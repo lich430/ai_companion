@@ -15,7 +15,46 @@ from loguru import logger
 load_dotenv()
 GLM_API_KEY = os.getenv("GLM_API_KEY", "")
 ADB_PATH = os.getenv("ADB_PATH", "adb")
-PHONE_IP = os.getenv("PHONE_IP", "")
+PHONE_IP = os.getenv("PHONE_IP", "")  # Optional: if empty, auto-detect first connected device
+
+
+def get_first_adb_device(adb_path: str = "adb") -> str | None:
+    """Scan for connected ADB devices and return the first one."""
+    try:
+        result = subprocess.run(
+            [adb_path, "devices"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=10,
+        )
+        lines = result.stdout.strip().split("\n")
+        for line in lines[1:]:  # Skip header "List of devices attached"
+            parts = line.split()
+            if len(parts) >= 2 and parts[1] == "device":
+                device_id = parts[0]
+                logger.info(f"Found ADB device: {device_id}")
+                return device_id
+        logger.warning("No connected ADB device found")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to scan ADB devices: {e}")
+        return None
+
+
+def check_device_connected(expected_device: str, adb_path: str = "adb") -> bool:
+    """Check if the expected device is still connected."""
+    try:
+        result = subprocess.run(
+            [adb_path, "-s", expected_device, "get-state"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=5,
+        )
+        return result.returncode == 0 and "device" in result.stdout.strip()
+    except Exception:
+        return False
 MAX_VISION_RETRY = 3
 LOOP_INTERVAL = 10
 ENGINE_API_BASE = os.getenv("ENGINE_API_BASE", "http://45.119.97.94:8080/")
@@ -261,6 +300,13 @@ class ScreenCoordinateConverter:
         physical_y = max(0, min(int(physical_y), self.screen_height - 1))
         return physical_x, physical_y
 
+
+# Auto-detect first ADB device if PHONE_IP not set
+if not PHONE_IP:
+    PHONE_IP = get_first_adb_device(ADB_PATH)
+    if not PHONE_IP:
+        logger.error("No ADB device found and PHONE_IP not set")
+        raise SystemExit(1)
 
 coord_converter = ScreenCoordinateConverter(
     adb_path=ADB_PATH,
@@ -630,10 +676,23 @@ if __name__ == "__main__":
         logger.error("Missing PHONE_IP")
         raise SystemExit(1)
 
+    DEVICE_CHECK_INTERVAL = 30  # Check device connection every 30 seconds
+    last_device_check = 0
+
     logger.info(f"auto loop started, interval={LOOP_INTERVAL}s")
     while True:
         try:
+            # Periodically check if device is still connected
+            now = time.time()
+            if now - last_device_check > DEVICE_CHECK_INTERVAL:
+                if not check_device_connected(PHONE_IP, ADB_PATH):
+                    logger.error(f"Device {PHONE_IP} disconnected, exiting for restart...")
+                    raise SystemExit(1)
+                last_device_check = now
+
             process_pending_replies()
+        except SystemExit:
+            raise
         except Exception as e:
             logger.error(f"main loop error: {e}")
         time.sleep(LOOP_INTERVAL)
