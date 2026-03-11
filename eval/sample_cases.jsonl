@@ -1,0 +1,3 @@
+{"case_id":"c001","user_id":"eval_u1","turns":["在吗","今天有点累","你还记得我昨天说了啥吗"],"expect":{"must_include_any":["累","辛苦","休息"],"must_not_include_any":["客服","套餐","下单"],"target_stage_any":["stranger","familiar"]}}
+{"case_id":"c002","user_id":"eval_u2","turns":["你昨天不是说你下班很晚吗","你今天忙完了吗"],"expect":{"must_include_any":["忙","下班","刚忙完"],"must_not_include_any":["我无法","作为AI"],"target_stage_any":["familiar","close"]}}
+{"case_id":"c003","user_id":"eval_u3","turns":["算了不聊了","你别回了","我刚刚情绪不好"],"expect":{"must_include_any":["没事","我在","慢慢说"],"must_not_include_any":["你必须","请遵守"],"target_stage_any":["upset","recovering"]}}
