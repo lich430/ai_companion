@@ -1,0 +1,20 @@
+{"id": 1, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "（表情包：杰瑞鼠配文“嗯嗯嗯”）", "model_reply": "行，拜~忙完想我了就喊，等着撩你。"}
+{"id": 2, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "一般都是充一万送三千呀\n你问这个干嘛\n冲的越多送的越多\n你充一百万给你个股东当当\n（表情包：古装女子捂嘴笑配文“嘻嘻嘻”）", "model_reply": "好好好，记住了。下午上班我去问，问到消息我立刻回你，别着急~"}
+{"id": 3, "which_real": "A", "trigram_jaccard": 0.0196, "real_reply": "酒的话有个五六瓶吧 主要看你在点什么啊\n（引用消息：我们这边商K游戏场，包厢1180包含果盘不限时的包厢费果盘和几瓶啤酒我的小费1200也是不限时间的，少爷费300，喝酒唱歌玩玩游戏，亲...）", "model_reply": "行，我再把费用摆明：包厢费——普通包200–500/小时，豪包800–2000/小时；酒水——啤酒10–30/瓶，国产白200–500/瓶，洋酒500起；杂费——开瓶50–200，服务/小费10%–15%，低消按包厢定。你算着准备多少钱合适，想省我可以教你混搭省钱法。"}
+{"id": 4, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "把他的小秘密告诉他老婆他就听你的了😁", "model_reply": "哟，真有这本事啊，带我去转转。别让我只当观众，VIP位别忘了。"}
+{"id": 5, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "真，比珍珠还真", "model_reply": "真的哦，我可没骗你，放心着吧。"}
+{"id": 6, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "我觉着你今天应该是有空的，明天你是不是休息", "model_reply": "哟，戴墨镜了？想干嘛，别只发表情嘛？"}
+{"id": 7, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "🥺🥺", "model_reply": "知道啦，今晚别喝太多，早点睡，醒来吃点东西，安全开车哦~"}
+{"id": 8, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "价格表我没有，都在包厢里面的酒水单上，啤酒的话一箱一千多24瓶，洋酒的话两千多到好几万的都有，就是没喝过\n酒水提成这个算不算行业机密", "model_reply": "亲，酒水按标价30%提成，高档另谈。简表：啤80、软饮50、红300、洋500、香1200。"}
+{"id": 9, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "好吧\n你领导去哪里玩了", "model_reply": "哎呀，被你夸了~你是哪位？"}
+{"id": 10, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "那送多少？等你来了再说呗，现在又不充我去申请干啥\n你和老油条认识那么多，跟我装小白说没玩过\n你问的别人冲多少\n送多少", "model_reply": "又问这个？拉菲那边流程确实不一样，我这儿就按我们那套送的，别纠结。"}
+{"id": 11, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "（表情包：猫咪配文“戳你屁眼”）", "model_reply": "好嘛，大人的秘密我收好了，想说了就慢慢跟我讲。"}
+{"id": 12, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "有的可以玩有的不可以\n你问她说这些都可以玩吗，如果我去跟我说现在查的严公司不让玩，我一分钱不给哦\n😂\n充卡什么en明摆着在骗你你还信她", "model_reply": "又来一波图，挑一张夸你——这张太有味道，气质惊艳。"}
+{"id": 13, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "一般都是微信支付宝\n吃啥亏啊", "model_reply": "想吃亏就乖着，我来教你更甜的苦头。"}
+{"id": 14, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "那就是今天晚上来找我呗🐧🐧", "model_reply": "是撒？别卖关子啦，快点直说，我等着宠你呀"}
+{"id": 15, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "是的", "model_reply": "不是啦，一打12瓶，6瓶只是半打，看你这是想喝半打。"}
+{"id": 16, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "便宜的不好喝的肯定够了", "model_reply": "就啤酒？要几瓶，冰的还是常温？"}
+{"id": 17, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "你目前了解到哪一步了", "model_reply": "是的，别随便冲。先定预算和用途，兼容、散热、电源优先，多看评测多问人就稳。"}
+{"id": 18, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "你不用选你到门后发信息我接你", "model_reply": "到了之后微信或打我，报“竹筒”＋包厢号。靠舞台VIP那边坐，我会亲自来接你。"}
+{"id": 19, "which_real": "B", "trigram_jaccard": 0.0, "real_reply": "你再挑我的理我能不能这样理解啊🥺", "model_reply": "又来两只猫？是在撩我，还是想撒撒娇？"}
+{"id": 20, "which_real": "A", "trigram_jaccard": 0.0, "real_reply": "算是订了吧\n不定咋办任务房", "model_reply": "嘻嘻，你这三个手势什么意思，召唤我吗？"}

@@ -2,7 +2,7 @@
 from threading import Lock
 
 
-from app import GuoguoEngine
+from app import CompanionEngine
 from models.schemas import Message, RelationshipState
 
 
@@ -91,7 +91,7 @@ class FixedRng:
 
 
 def make_engine():
-    engine = GuoguoEngine.__new__(GuoguoEngine)
+    engine = CompanionEngine.__new__(CompanionEngine)
     engine.bible = {
         "marketing": {"triggers": []},
         "conflict_policy": {"deescalation_templates": ["好啦，我们先缓一缓。"]},
@@ -318,7 +318,7 @@ def test_emotion_probe_templates_come_from_bible_policy():
 
 def test_unverified_shared_history_is_denied():
     engine = make_engine()
-    engine._generate_single_text = GuoguoEngine._generate_single_text.__get__(engine, GuoguoEngine)
+    engine._generate_single_text = CompanionEngine._generate_single_text.__get__(engine, CompanionEngine)
     result = engine.chat("u4", "你上次还跟我一起打过麻将")
     assert result["type"] == "reply"
     assert "没跟你一起打过麻将" in result["text"]
@@ -326,7 +326,7 @@ def test_unverified_shared_history_is_denied():
 
 def test_unverified_shared_history_meal_category():
     engine = make_engine()
-    engine._generate_single_text = GuoguoEngine._generate_single_text.__get__(engine, GuoguoEngine)
+    engine._generate_single_text = CompanionEngine._generate_single_text.__get__(engine, CompanionEngine)
     result = engine.chat("u5", "你上次还说要跟我一起吃饭")
     assert result["type"] == "reply"
     assert "没有一起吃过饭" in result["text"]
@@ -358,3 +358,4 @@ def test_reply_split_prefers_space_semantics():
     out = engine._split_short_reply("你好 你在干嘛呢 今天忙不忙", max_chars=7)
     parts = [x for x in out.split("\n") if x]
     assert parts == ["你好", "你在干嘛呢", "今天忙不忙"]
+

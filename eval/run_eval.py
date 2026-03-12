@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
-from app import GuoguoEngine
+from app import CompanionEngine
 
 
 @dataclass
@@ -28,10 +28,12 @@ def load_cases(path: str) -> List[dict]:
     return cases
 
 
-def run_case(engine: GuoguoEngine, case: dict) -> CaseResult:
+def run_case(engine: CompanionEngine, case: dict) -> CaseResult:
     user_id = case["user_id"]
+    reply_text = ""
     for t in case["turns"]:
-        reply = engine.chat(user_id=user_id, user_text=t)
+        result = engine.chat(user_id=user_id, user_text=t)
+        reply_text = str(result.get("text", "") or "")
     state = engine.get_state_snapshot(user_id)
 
     expect = case.get("expect", {})
@@ -40,10 +42,10 @@ def run_case(engine: GuoguoEngine, case: dict) -> CaseResult:
     target_stages = expect.get("target_stage_any", [])
 
     checks = {
-        "contains_expected": True if not must_in else any(x in reply for x in must_in),
-        "avoids_forbidden": True if not must_not else all(x not in reply for x in must_not),
+        "contains_expected": True if not must_in else any(x in reply_text for x in must_in),
+        "avoids_forbidden": True if not must_not else all(x not in reply_text for x in must_not),
         "stage_expected": True if not target_stages else state.get("stage") in target_stages,
-        "length_natural": 6 <= len(reply) <= 80,
+        "length_natural": 6 <= len(reply_text) <= 80,
     }
 
     # 简单加权评分（0~100）
@@ -58,13 +60,13 @@ def run_case(engine: GuoguoEngine, case: dict) -> CaseResult:
         case_id=case["case_id"],
         score=float(score),
         checks=checks,
-        final_reply=reply,
+        final_reply=reply_text,
         final_state=state,
     )
 
 
 def main():
-    engine = GuoguoEngine()
+    engine = CompanionEngine()
     cases = load_cases("eval/sample_cases.jsonl")
     results = [run_case(engine, c) for c in cases]
 
@@ -80,3 +82,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

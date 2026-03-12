@@ -1,0 +1,88 @@
+{
+  "total_dialog_messages": 414,
+  "total_pairs": 144,
+  "zhutong_messages": 211,
+  "zhutong_non_sticker_messages": 194,
+  "top_short_phrases": [
+    {
+      "text": "哈哈哈",
+      "count": 3
+    },
+    {
+      "text": "是的",
+      "count": 2
+    },
+    {
+      "text": "你出发了吗",
+      "count": 2
+    }
+  ],
+  "top_sentence_templates": [
+    {
+      "template": "如果连包厢都刷了那肯定就跟我没关系了🥺",
+      "count": 2
+    }
+  ],
+  "common_ngram_phrases": [
+    {
+      "text": "出来玩",
+      "count": 6
+    },
+    {
+      "text": "哈哈哈",
+      "count": 6
+    },
+    {
+      "text": "是不是",
+      "count": 4
+    },
+    {
+      "text": "不喜欢",
+      "count": 4
+    },
+    {
+      "text": "来的话",
+      "count": 3
+    },
+    {
+      "text": "，如果",
+      "count": 3
+    },
+    {
+      "text": "就跟我",
+      "count": 3
+    },
+    {
+      "text": "，现在",
+      "count": 3
+    },
+    {
+      "text": "啊，还",
+      "count": 3
+    },
+    {
+      "text": "来给我",
+      "count": 3
+    },
+    {
+      "text": "都没有",
+      "count": 3
+    },
+    {
+      "text": "你今天",
+      "count": 3
+    },
+    {
+      "text": "老客人",
+      "count": 3
+    },
+    {
+      "text": "都出来",
+      "count": 3
+    },
+    {
+      "text": "都出来玩",
+      "count": 3
+    }
+  ]
+}

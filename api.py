@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 import os
@@ -10,18 +10,61 @@ import time
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
-from app import GuoguoEngine
+from app import CompanionEngine
 from engine.cadence_simulator import CadenceSimulator
 
 
 logger = logging.getLogger("uvicorn.error")
 INCOMING_BATCH_WAIT_SEC = float(os.getenv("INCOMING_BATCH_WAIT_SEC", "40"))
+BLOCK_ALL_GROUP_MESSAGES = os.getenv("BLOCK_ALL_GROUP_MESSAGES", "false").lower() == "true"
+BLOCK_GROUP_IDS = {x.strip() for x in os.getenv("BLOCK_GROUP_IDS", "").split(",") if x.strip()}
+BLOCK_GROUP_KEYWORDS = {x.strip() for x in os.getenv("BLOCK_GROUP_KEYWORDS", "").split(",") if x.strip()}
+INCOMING_DEDUP_WINDOW_SEC = max(0.0, float(os.getenv("INCOMING_DEDUP_WINDOW_SEC", "3")))
+_incoming_dedup_seen: dict[tuple[str, str], float] = {}
+_incoming_dedup_lock = Lock()
+
+
+def _is_group_chat(value: Optional[str]) -> bool:
+    raw = str(value or "").strip()
+    return bool(raw) and raw.endswith("@chatroom")
+
+
+def _should_filter_group_message(username: str, user_id: Optional[str]) -> bool:
+    uid = str(user_id or username or "").strip()
+    name = str(username or "").strip()
+    if not (_is_group_chat(uid) or _is_group_chat(name)):
+        return False
+    if BLOCK_ALL_GROUP_MESSAGES:
+        return True
+    if uid in BLOCK_GROUP_IDS or name in BLOCK_GROUP_IDS:
+        return True
+    return any((kw in uid) or (kw in name) for kw in BLOCK_GROUP_KEYWORDS)
+
+
+def _is_duplicate_incoming(username: str, user_id: Optional[str], message: str) -> bool:
+    if INCOMING_DEDUP_WINDOW_SEC <= 0:
+        return False
+    uid = str(user_id or username or "").strip()
+    msg = str(message or "").strip()
+    if not uid or not msg:
+        return False
+    key = (uid, msg)
+    now = time.time()
+    cutoff = now - INCOMING_DEDUP_WINDOW_SEC
+    with _incoming_dedup_lock:
+        if len(_incoming_dedup_seen) > 10000:
+            stale = [k for k, ts in _incoming_dedup_seen.items() if ts < cutoff]
+            for k in stale:
+                _incoming_dedup_seen.pop(k, None)
+        last = _incoming_dedup_seen.get(key)
+        _incoming_dedup_seen[key] = now
+    return last is not None and (now - last) <= INCOMING_DEDUP_WINDOW_SEC
 
 
 class ChatRequest(BaseModel):
     user_id: str
     message: str
-    with_cadence: bool = Field(default=True, description="是否返回分段/延迟计划")
+    with_cadence: bool = Field(default=True, description="鏄惁杩斿洖鍒嗘/寤惰繜璁″垝")
 
 
 class CadencePart(BaseModel):
@@ -126,7 +169,7 @@ class ReplyPolicyStatsResponse(BaseModel):
 
 
 app = FastAPI(title="Guoguo AI Companion API", version="1.2.0")
-engine = GuoguoEngine()
+engine = CompanionEngine()
 cadence_sim = CadenceSimulator()
 incoming_queue: Queue = Queue(maxsize=5000)
 _worker_started = False
@@ -218,8 +261,14 @@ def health():
         "role_name": engine.role_name,
         "role_id": engine.role_id,
         "role_bible_path": engine.role_bible_path,
+        "llm_provider": getattr(engine, "llm_provider", "glm"),
+        "chat_model": engine.generator.model,
         "glm_chat_model": engine.generator.model,
         "incoming_batch_wait_sec": INCOMING_BATCH_WAIT_SEC,
+        "block_all_group_messages": BLOCK_ALL_GROUP_MESSAGES,
+        "block_group_ids_count": len(BLOCK_GROUP_IDS),
+        "block_group_keywords_count": len(BLOCK_GROUP_KEYWORDS),
+        "incoming_dedup_window_sec": INCOMING_DEDUP_WINDOW_SEC,
     }
 
 
@@ -312,6 +361,29 @@ def hook_incoming(req: HookIncomingRequest):
     logger.info(
         f"/hook/incoming request: username={req.username!r}, user_id={req.user_id!r}, message={req.message!r}"
     )
+    if _should_filter_group_message(req.username, req.user_id):
+        logger.info(
+            "/hook/incoming filtered group message: username=%r, user_id=%r",
+            req.username,
+            req.user_id,
+        )
+        return HookIncomingResponse(
+            ok=True,
+            reason="filtered_group",
+            queue_size=incoming_queue.qsize(),
+        )
+    if _is_duplicate_incoming(req.username, req.user_id, req.message):
+        logger.info(
+            "/hook/incoming duplicate dropped: username=%r, user_id=%r, message=%r",
+            req.username,
+            req.user_id,
+            req.message,
+        )
+        return HookIncomingResponse(
+            ok=True,
+            reason="duplicate_message",
+            queue_size=incoming_queue.qsize(),
+        )
     task_id = _next_task_id()
     task = {
         "task_id": task_id,
@@ -348,3 +420,4 @@ def hook_pending(limit: int = 1, pop: bool = True):
 def get_reply_policy_stats():
     logger.info("/metrics/reply_policy request")
     return ReplyPolicyStatsResponse(stats=engine.get_reply_policy_stats())
+

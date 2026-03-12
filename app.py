@@ -21,13 +21,12 @@ from engine.prompt_builder import build_system_prompt, build_user_prompt
 from engine.proactive_scheduler import ProactivePlan, ProactiveScheduler
 from engine.relationship_state_machine import RelationshipStateMachine
 from engine.repetition_guard import RepetitionGuard
-from engine.response_generator import GLMResponseGenerator
+from engine.response_generator import GLMResponseGenerator, OpenAIResponseGenerator
 from engine.style_controller import StyleController
-from engine.text_postprocess import postprocess_reply
 from models.schemas import Message, RelationshipState, ReplyDecision, ResponseContext, UserProfile
 
 
-class GuoguoEngine:
+class CompanionEngine:
     @staticmethod
     def _load_local_timezone():
         key = os.getenv("LOCAL_TIMEZONE", "Asia/Shanghai")
@@ -38,19 +37,30 @@ class GuoguoEngine:
 
     def __init__(self):
         load_dotenv()
-        self.api_key = os.getenv("GLM_API_KEY", "")
-        if not self.api_key:
-            raise RuntimeError("Missing GLM_API_KEY. Please set it in .env.")
-
+        self.llm_provider = os.getenv("LLM_PROVIDER", "glm").strip().lower()
+        glm_api_key = os.getenv("GLM_API_KEY", "")
+        openai_api_key = os.getenv("OPENAI_API_KEY", "")
         chat_model = os.getenv("GLM_CHAT_MODEL", "glm-4.7")
         embed_model = os.getenv("GLM_EMBED_MODEL", "embedding-3")
+        llm_api_key = glm_api_key
+        if self.llm_provider == "openai":
+            chat_model = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+            llm_api_key = openai_api_key
+        elif self.llm_provider != "glm":
+            raise RuntimeError("Unsupported LLM_PROVIDER. Use 'glm' or 'openai'.")
+
+        if not llm_api_key:
+            if self.llm_provider == "openai":
+                raise RuntimeError("Missing OPENAI_API_KEY. Please set it in .env.")
+            raise RuntimeError("Missing GLM_API_KEY. Please set it in .env.")
         self.summary_every_n_turns = int(os.getenv("MEMORY_SUMMARY_EVERY_N_TURNS", "8"))
         self.local_timezone = self._load_local_timezone()
         self.quiet_hours = os.getenv("QUIET_HOURS", "02:00-09:00")
         self.emoji_enabled = os.getenv("EMOJI_ENABLED", "true").lower() != "false"
-        self.max_reply_chars = int(os.getenv("MAX_REPLY_CHARS", "20"))
+        self.preferred_reply_chars = int(os.getenv("PREFERRED_REPLY_CHARS", "30"))
         self.glm_context_messages = int(os.getenv("GLM_CONTEXT_MESSAGES", "200"))
         self.max_batch_replies = int(os.getenv("MAX_BATCH_REPLIES", "3"))
+        self.multi_reply_probability = max(0.0, min(1.0, float(os.getenv("MULTI_REPLY_PROBABILITY", "0.2"))))
         self.rng = random.Random(int(os.getenv("TEXT_POSTPROCESS_SEED", "20260307")))
 
         lexical_th = float(os.getenv("LEXICAL_REPEAT_THRESHOLD", "0.72"))
@@ -60,12 +70,15 @@ class GuoguoEngine:
         self.bible = BibleLoader(self.role_bible_path).load()
         self.role_name = str(self.bible.get("name", "") or "").strip() or "unknown"
         self.role_id = str(self.bible.get("role_id", "") or "").strip() or "unknown"
-        self.embedding = EmbeddingService(api_key=self.api_key, model=embed_model)
+        self.embedding = EmbeddingService(api_key=glm_api_key, model=embed_model)
         self.identity_guard = IdentityGuard("data/identity_deflection_templates.json")
         self.memory = MemoryManager("memory.db", embedding_service=self.embedding)
         self.state_machine = RelationshipStateMachine(self.bible)
         self.style_controller = StyleController(self.bible)
-        self.generator = GLMResponseGenerator(api_key=self.api_key, model=chat_model)
+        if self.llm_provider == "openai":
+            self.generator = OpenAIResponseGenerator(api_key=llm_api_key, model=chat_model)
+        else:
+            self.generator = GLMResponseGenerator(api_key=llm_api_key, model=chat_model)
         self.summarizer = MemorySummarizer(self.generator, self.bible)
         self.rep_guard = RepetitionGuard(
             embedding_service=self.embedding,
@@ -80,6 +93,7 @@ class GuoguoEngine:
         self.pending_replies = deque()
         self._pending_lock = Lock()
         self._pending_seq = 0
+        self._last_proactive_ask_turn: dict[str, int] = {}
         self.reply_policy_stats = {
             "reply": 0,
             "noreply": 0,
@@ -166,6 +180,25 @@ class GuoguoEngine:
     @staticmethod
     def _has_recent_context(recent: list[Message]) -> bool:
         return len(recent) >= 2
+
+    @staticmethod
+    def _is_greeting_message(text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        compact = re.sub(r"\s+", "", raw)
+        plain = re.sub("[^0-9A-Za-z\u4e00-\u9fff]+", "", compact).lower()
+        greeting_set = {
+            "你好",
+            "您好",
+            "哈喽",
+            "嗨",
+            "在吗",
+            "在么",
+            "hello",
+            "hi",
+        }
+        return plain in greeting_set
 
     @staticmethod
     def _marketing_triggered(text: str, bible: dict) -> bool:
@@ -420,28 +453,70 @@ class GuoguoEngine:
         self.memory.extract_and_store_user_memory(user_id, user_text)
         return state, recent
 
-    def _build_style(self, state: RelationshipState, user_text: str, cls: dict) -> dict:
+    def _build_style(self, user_id: str, state: RelationshipState, user_text: str, cls: dict) -> dict:
         style = self.style_controller.build_style_directives(state)
         style["emoji_enabled"] = self.emoji_enabled
         style["marketing_allowed"] = self._marketing_triggered(user_text, self.bible)
         style["low_context"] = bool(cls.get("low_context"))
         style["clarify_needed"] = bool(cls.get("low_context")) and not bool(cls.get("hostile"))
+        style["preferred_reply_chars"] = max(10, int(getattr(self, "preferred_reply_chars", 30)))
         style["forbidden_fillers"] = (
             self.bible.get("speech_style", {}).get("forbidden_fillers")
             or ["哎呀", "呀", "呢"]
         )
+        style["short_reply_mode"] = False
+        short_cfg = self.bible.get("short_sentence_policy") or {}
+        if bool(short_cfg.get("enabled", False)):
+            short_prob = max(0.0, min(1.0, float(short_cfg.get("probability", 0.10))))
+            if (not cls.get("urgent")) and self.rng.random() < short_prob:
+                style["short_reply_mode"] = True
+                style["short_reply_max_chars"] = max(4, int(short_cfg.get("max_chars", 14)))
+
+        style["proactive_question_mode"] = False
+        pq_cfg = self.bible.get("proactive_question_policy") or {}
+        stage_allowlist = {str(x).strip() for x in (pq_cfg.get("stage_allowlist") or []) if str(x).strip()}
+        stage_allowed = (not stage_allowlist) or (state.stage in stage_allowlist)
+        if (
+            bool(pq_cfg.get("enabled", False))
+            and stage_allowed
+            and state.initiative >= float(pq_cfg.get("min_initiative", 0.18))
+            and not cls.get("hostile")
+            and not cls.get("low_context")
+        ):
+            ask_prob = max(0.0, min(1.0, float(pq_cfg.get("probability", 0.18))))
+            min_gap = max(1, int(pq_cfg.get("min_turn_gap", 6)))
+            now_turn = self._get_turn_count(user_id)
+            last_turn = int(self._last_proactive_ask_turn.get(user_id, -10**9))
+            if (now_turn - last_turn) >= min_gap and self.rng.random() < ask_prob:
+                templates = [str(x).strip() for x in (pq_cfg.get("question_templates") or []) if str(x).strip()]
+                if templates:
+                    style["proactive_question_mode"] = True
+                    style["proactive_question_template"] = self.rng.choice(templates)
         return style
 
+    def _apply_turn_style_adjustments(self, user_id: str, text: str, style: dict) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+
+        if style.get("short_reply_mode"):
+            max_chars = max(4, int(style.get("short_reply_max_chars", 14) or 14))
+            first = re.split(r"[。！？!?\n]", out)[0].strip() or out
+            if len(first) > max_chars:
+                first = first[:max_chars].rstrip("，。！？,.!?;；:：")
+            out = first
+
+        if style.get("proactive_question_mode"):
+            q = str(style.get("proactive_question_template", "") or "").strip()
+            if q and ("？" not in out and "?" not in out):
+                out = f"{out} {q}".strip()
+                self._last_proactive_ask_turn[user_id] = self._get_turn_count(user_id)
+        return out
+
     def _finalize_reply(self, state: RelationshipState, raw_reply: str, reason: str, urgent: bool) -> ReplyDecision:
-        style = self.style_controller.build_style_directives(state)
-        style["emoji_enabled"] = self.emoji_enabled
-        style["forbidden_fillers"] = (
-            self.bible.get("speech_style", {}).get("forbidden_fillers")
-            or ["哎呀", "呀", "呢"]
-        )
-        processed = postprocess_reply(raw_reply, style, self.rng)
-        processed = self._sanitize_forbidden_invite(processed)
-        processed = self._split_short_reply(processed, max_chars=getattr(self, "max_reply_chars", 20))
+        # Keep model output as-is for context consistency.
+        processed = (raw_reply or "").strip()
+        processed = self._sanitize_surveillance_tone(processed)
         if not processed:
             processed = "我在这陪你"
         return ReplyDecision(
@@ -450,6 +525,25 @@ class GuoguoEngine:
             recommended_delay_ms=self._recommended_delay_ms(state, urgent=urgent),
             reason=reason,
         )
+
+    @staticmethod
+    def _sanitize_surveillance_tone(text: str) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+        replacements = {
+            "盯着你": "陪着你",
+            "我盯着你": "我陪着你",
+            "看着你": "陪着你",
+            "我看着你": "我陪着你",
+            "别急~": "慢慢来~",
+            "别急": "慢慢来",
+        }
+        for src, dst in replacements.items():
+            out = out.replace(src, dst)
+        # Remove overly permissive tail phrase.
+        out = re.sub(r"(，|,)?\s*只要不过分(就行|就好|就可以)?[。.!！?？]*$", "", out).strip()
+        return out
 
     @staticmethod
     def _sanitize_forbidden_invite(text: str) -> str:
@@ -476,41 +570,16 @@ class GuoguoEngine:
         return out
 
     @staticmethod
-    def _split_short_reply(text: str, max_chars: int = 20) -> str:
+    def _split_short_reply(text: str, max_chars: int = 10) -> str:
         raw = (text or "").strip()
         if not raw:
             return raw
         max_chars = max(1, int(max_chars))
-        lines = [line.strip() for line in re.split(r"\n+", raw) if line.strip()]
-        chunks: list[str] = []
-        for line in lines:
-            words = [word for word in re.split(r"\s+", line) if word]
-            if not words:
-                continue
-
-            current = ""
-            for word in words:
-                if len(word) > max_chars:
-                    if current:
-                        chunks.append(current)
-                        current = ""
-                    start = 0
-                    while start < len(word):
-                        chunks.append(word[start : start + max_chars].strip())
-                        start += max_chars
-                    continue
-
-                candidate = f"{current} {word}".strip() if current else word
-                if len(candidate) <= max_chars:
-                    current = candidate
-                else:
-                    if current:
-                        chunks.append(current)
-                    current = word
-
-            if current:
-                chunks.append(current)
-        return "\n".join([chunk for chunk in chunks if chunk])
+        # Keep a single short line by default to avoid over-splitting into many messages.
+        compact = re.sub(r"\s+", " ", raw.replace("\n", " ")).strip()
+        if len(compact) <= max_chars:
+            return compact
+        return compact[:max_chars].rstrip("，。！？,.!?;；:：")
 
     def _generate_single_text(self, user_id: str, user_text: str, state: RelationshipState, recent: list[Message], cls: dict) -> str:
         if self.identity_guard.is_identity_probe(user_text):
@@ -539,10 +608,11 @@ class GuoguoEngine:
             recalled_memories=recalled,
             role_life_memories=role_life,
         )
-        style = self._build_style(state, user_text, cls)
+        style = self._build_style(user_id, state, user_text, cls)
 
         for _ in range(5):
             candidate = self.generator.generate(self.bible, style, ctx)
+            candidate = self._apply_turn_style_adjustments(user_id, candidate, style)
             if self._leaks_ai_identity(candidate):
                 continue
             if self._is_hostile_reply(candidate):
@@ -602,11 +672,12 @@ class GuoguoEngine:
             recalled_memories=recalled,
             role_life_memories=role_life,
         )
-        style = self._build_style(state, latest_text, cls)
+        style = self._build_style(user_id, state, latest_text, cls)
         system_prompt = build_system_prompt(self.bible, style) + f"""
 额外任务：
-- 用户刚刚连续发了多条消息，请一次性给出 1~{max_replies} 条短回复。
+- 用户刚刚连续发了多条消息，请一次性给出 1~3 条短回复。
 - 回复之间要前后连贯，像连续发出的多条微信消息。
+- 每条回复大多数控制在 5~15 字左右。
 - 仅输出 JSON，格式：{{"replies": ["回复1", "回复2"]}}
 """
         batch_lines = "\n".join([f"- {text}" for text in latest_user_messages if text.strip()])
@@ -616,7 +687,14 @@ class GuoguoEngine:
             raw = self.generator.chat(system_prompt, user_prompt, temperature=0.75)
             replies = self._parse_multi_replies(raw, max_replies=max_replies)
             cleaned = []
+            question_injected = False
             for reply in replies:
+                style_for_reply = dict(style)
+                if question_injected:
+                    style_for_reply["proactive_question_mode"] = False
+                reply = self._apply_turn_style_adjustments(user_id, reply, style_for_reply)
+                if ("？" in reply or "?" in reply) and style_for_reply.get("proactive_question_mode"):
+                    question_injected = True
                 if self._leaks_ai_identity(reply):
                     continue
                 if self._is_hostile_reply(reply):
@@ -641,6 +719,7 @@ class GuoguoEngine:
     def chat(self, user_id: str, user_text: str) -> dict:
         incoming_text = (user_text or "").strip()
         cls = classify_user_message(incoming_text)
+        is_greeting = self._is_greeting_message(incoming_text)
         had_context_before = self._has_recent_context(self._get_recent(user_id))
 
         self.turn_counts[user_id] = self._get_turn_count(user_id) + 1
@@ -650,9 +729,9 @@ class GuoguoEngine:
 
         if self._is_quiet_hours() and not cls["urgent"]:
             decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")
-        elif self._is_repeated_user_spam(recent, incoming_texts=[incoming_text]):
+        elif (not is_greeting) and self._is_repeated_user_spam(recent, incoming_texts=[incoming_text]):
             decision = self._build_repeat_spam_decision()
-        elif cls["low_context"] and not had_context_before:
+        elif (not is_greeting) and cls["low_context"] and not had_context_before:
             decision = ReplyDecision(
                 type="reply",
                 text="？",
@@ -765,6 +844,7 @@ class GuoguoEngine:
         cleaned = [str(value).strip() for value in (messages or []) if str(value).strip()]
         if not cleaned:
             return {"ok": False, "reason": "empty_message"}
+        is_greeting_batch = all(self._is_greeting_message(text) for text in cleaned)
 
         had_context_before = self._has_recent_context(self._get_recent(uid))
         classifications = [classify_user_message(text) for text in cleaned]
@@ -788,9 +868,9 @@ class GuoguoEngine:
 
         if self._is_quiet_hours() and not combined["urgent"]:
             decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")]
-        elif self._is_repeated_user_spam(recent, incoming_texts=cleaned):
+        elif (not is_greeting_batch) and self._is_repeated_user_spam(recent, incoming_texts=cleaned):
             decisions = [self._build_repeat_spam_decision()]
-        elif combined["low_context"] and not had_context_before:
+        elif (not is_greeting_batch) and combined["low_context"] and not had_context_before:
             decisions = [
                 ReplyDecision(
                     type="reply",
@@ -813,13 +893,14 @@ class GuoguoEngine:
         elif combined["hostile"] and not combined["urgent"]:
             decisions = [self._finalize_reply(state, self._soft_deescalation_reply(), "hostile_deescalation", urgent=False)]
         else:
+            allow_multi = combined["urgent"] or (self.rng.random() < self.multi_reply_probability)
             raw_replies = self._generate_multi_replies(
                 uid,
                 cleaned,
                 state=state,
                 recent=recent,
                 cls=combined,
-                max_replies=max(1, self.max_batch_replies),
+                max_replies=(max(2, self.max_batch_replies) if allow_multi else 1),
             )
             decisions = [self._finalize_reply(state, reply, "reply", urgent=combined["urgent"]) for reply in raw_replies]
 
@@ -878,16 +959,22 @@ class GuoguoEngine:
         return data
 
 
+# Backward compatibility alias for old imports.
+GuoguoEngine = CompanionEngine
+
+
 def main():
-    engine = GuoguoEngine()
-    print("Guoguo engine started. Type `exit` to quit.")
+    engine = CompanionEngine()
+    role_label = engine.role_name or "assistant"
+    print(f"{role_label} engine started. Type `exit` to quit.")
     while True:
         text = input("you> ").strip()
         if text.lower() == "exit":
             break
         result = engine.chat("cli_user", text)
-        print("guoguo>", result)
+        print(f"{role_label}>", result)
 
 
 if __name__ == "__main__":
     main()
+

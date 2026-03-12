@@ -19,8 +19,10 @@ class EmbeddingService:
         text = (text or "").strip()
         if not text:
             return [0.0] * self.dim
+        if not self.api_key:
+            return self._hash_embed(text)
 
-        # 优先使用远端语义向量，失败时自动退回本地哈希向量
+        # Prefer remote embedding, fallback to local hash embedding on failure.
         try:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
