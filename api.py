@@ -231,12 +231,28 @@ def _incoming_worker():
                 messages=messages,
                 user_id=(base_uid if base_uid else None),
             )
+            queued_items = result.get("queued_items") or []
             logger.info(
                 "incoming worker done batch: task_ids=%s, reason=%s, queued_items=%d",
                 task_ids,
                 result.get("reason"),
-                len(result.get("queued_items") or []),
+                len(queued_items),
             )
+            if queued_items:
+                replies = [str(item.get("reply", "")).strip() for item in queued_items]
+                delays = [int(item.get("recommended_delay_ms", 0) or 0) for item in queued_items]
+                logger.info(
+                    "incoming worker model replies: task_ids=%s, replies=%s, recommended_delay_ms=%s",
+                    task_ids,
+                    replies,
+                    delays,
+                )
+            else:
+                logger.info(
+                    "incoming worker no model reply: task_ids=%s, reason=%s",
+                    task_ids,
+                    result.get("reason"),
+                )
         except Exception as e:
             logger.error(f"incoming worker failed batch: task_ids={[x.get('task_id') for x in consumed]} err={e}")
         finally:

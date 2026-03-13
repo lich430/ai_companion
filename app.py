@@ -673,13 +673,23 @@ class CompanionEngine:
             role_life_memories=role_life,
         )
         style = self._build_style(user_id, state, latest_text, cls)
-        system_prompt = build_system_prompt(self.bible, style) + f"""
+        if max_replies <= 1:
+            reply_rule = """
 额外任务：
-- 用户刚刚连续发了多条消息，请一次性给出 1~3 条短回复。
+- 用户刚刚连续发了多条消息，只给出 1 条短回复。
+- 回复要自然承接上下文，像微信私聊。
+- 回复长度控制在 5~20 字。
+- 仅输出 JSON，格式：{"replies": ["回复1"]}
+"""
+        else:
+            reply_rule = f"""
+额外任务：
+- 用户刚刚连续发了多条消息，请一次性给出 1~{max_replies} 条短回复。
 - 回复之间要前后连贯，像连续发出的多条微信消息。
 - 每条回复大多数控制在 5~15 字左右。
 - 仅输出 JSON，格式：{{"replies": ["回复1", "回复2"]}}
 """
+        system_prompt = build_system_prompt(self.bible, style) + reply_rule
         batch_lines = "\n".join([f"- {text}" for text in latest_user_messages if text.strip()])
         user_prompt = build_user_prompt(ctx, role_name=self.role_name) + f"\n\n本次用户连续消息：\n{batch_lines}\n"
 
