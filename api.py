@@ -7,6 +7,9 @@ from threading import Thread, Lock
 from typing import List, Optional
 import time
 
+from dotenv import load_dotenv
+load_dotenv()  # 加载 .env 文件，必须在读取环境变量之前
+
 from fastapi import FastAPI
 from pydantic import BaseModel, Field
 
