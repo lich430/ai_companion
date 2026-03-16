@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 import requests
 
@@ -61,6 +62,18 @@ class GLMResponseGenerator(BaseResponseGenerator):
     def __init__(self, api_key: str, model: str = "glm-4.7"):
         super().__init__(api_key=api_key, model=model)
         self.url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        self.max_retries = max(0, int(os.getenv("GLM_MAX_RETRIES", "2")))
+        self.retry_backoff_sec = max(0.1, float(os.getenv("GLM_RETRY_BACKOFF_SEC", "1.0")))
+        self.fallback_model = str(os.getenv("GLM_FALLBACK_MODEL", "") or "").strip()
+
+    def _post_chat(self, model: str, headers: dict, data: dict) -> str:
+        payload = dict(data)
+        payload["model"] = model
+        resp = requests.post(self.url, headers=headers, json=payload, timeout=150)
+        if resp.ok:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        detail = (resp.text or "")[:1500]
+        raise requests.HTTPError(f"GLM chat failed: {resp.status_code} {detail}", response=resp)
 
     def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.85) -> str:
         self._log_request("glm", system_prompt, user_prompt)
@@ -81,11 +94,68 @@ class GLMResponseGenerator(BaseResponseGenerator):
             "frequency_penalty": 0.5,
             "presence_penalty": 0.35,
         }
-        resp = requests.post(self.url, headers=headers, json=data, timeout=150)
-        resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"].strip()
-        self._log_response("glm", content)
-        return content
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                content = self._post_chat(self.model, headers, data)
+                self._log_response("glm", content)
+                return content
+            except requests.HTTPError as e:
+                last_err = e
+                status = (e.response.status_code if e.response is not None else None)
+                detail = ((e.response.text if e.response is not None else str(e)) or "")[:600]
+                retryable = status in {408, 409, 429, 500, 502, 503, 504}
+                self.logger.error(
+                    "GLM request failed | model=%s attempt=%d/%d status=%s detail=%s",
+                    self.model,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    status,
+                    detail,
+                )
+                if (not retryable) or attempt >= self.max_retries:
+                    break
+                time.sleep(self.retry_backoff_sec * (2 ** attempt))
+            except Exception as e:
+                last_err = e
+                self.logger.error(
+                    "GLM request exception | model=%s attempt=%d/%d err=%s",
+                    self.model,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    e,
+                )
+                if attempt >= self.max_retries:
+                    break
+                time.sleep(self.retry_backoff_sec * (2 ** attempt))
+
+        if self.fallback_model and self.fallback_model != self.model:
+            self.logger.warning(
+                "GLM primary model failed, retrying with fallback model: %s -> %s",
+                self.model,
+                self.fallback_model,
+            )
+            for attempt in range(self.max_retries + 1):
+                try:
+                    content = self._post_chat(self.fallback_model, headers, data)
+                    self._log_response("glm", content)
+                    return content
+                except Exception as e:
+                    last_err = e
+                    self.logger.error(
+                        "GLM fallback request failed | model=%s attempt=%d/%d err=%s",
+                        self.fallback_model,
+                        attempt + 1,
+                        self.max_retries + 1,
+                        e,
+                    )
+                    if attempt >= self.max_retries:
+                        break
+                    time.sleep(self.retry_backoff_sec * (2 ** attempt))
+
+        if isinstance(last_err, Exception):
+            raise last_err
+        raise RuntimeError("GLM request failed without error context")
 
 
 class OpenAIResponseGenerator(BaseResponseGenerator):

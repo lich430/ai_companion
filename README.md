@@ -9,13 +9,12 @@
 - 消息分类
 - quiet hours / noreply 策略
 - 异步 Hook 入站
-- 微信自动发送侧
 
 的完整链路。
 
 ## 1. 当前整体架构
 
-项目现在分为 3 条主线：
+项目现在分为 2 条主线：
 
 1. `app.py`
 角色引擎核心。
@@ -25,7 +24,6 @@
 FastAPI 服务层。
 负责把引擎能力暴露成 HTTP 接口，并提供 Hook 异步入口和待发送消息队列接口。
 
-3. `wechat.py`
 微信发送侧执行器。
 不再负责“读未读消息并生成回复”，而是只做两件事：
 - 从后端拉取待发送消息
@@ -101,7 +99,6 @@ FastAPI 服务层。
 
 ### 微信发送侧
 
-- `wechat.py`
   - 轮询 `/hook/pending`
   - 通过广播：
     - `com.example.wechatglm.OPEN_CHAT`
@@ -137,7 +134,7 @@ FastAPI 服务层。
    - `state`
    - `cadence`
 
-### 流程 B：微信 Hook 入站 -> 后端异步处理 -> 微信发送
+### 流程 B：微信 Hook 入站 -> 后端异步处理
 
 这是现在微信链路的主线。
 
@@ -153,7 +150,6 @@ FastAPI 服务层。
    - 判断是否 `noreply`
    - 如果需要回复，允许一次生成多条回复
    - 把结果放入 `pending_replies` 队列
-6. `wechat.py` 轮询 `GET /hook/pending`
 7. 对每条 pending item：
    - 用 ADB 广播打开指定 `wxid` 聊天窗口
    - 识别聊天页输入框与发送按钮
@@ -247,7 +243,6 @@ SQLite 文件：
 
 也就是说：
 - 正在排队但尚未处理的 Hook 入站任务，服务重启会丢
-- 已生成但尚未被 `wechat.py` 拉取的 pending reply，服务重启会丢
 
 ## 6. 关键接口
 
@@ -349,9 +344,7 @@ GET /hook/pending?limit=5&pop=true
 GET /metrics/reply_policy
 ```
 
-## 7. wechat.py 当前职责
 
-`wechat.py` 现在不再负责：
 
 - 读微信未读消息
 - 从聊天页提取对方消息
@@ -368,7 +361,6 @@ GET /metrics/reply_policy
 
 - 收消息：Hook + `/hook/incoming`
 - 生成回复：`app.py`
-- 发消息：`wechat.py`
 
 ## 8. 启动方式
 
@@ -442,9 +434,6 @@ QUIET_HOURS=02:00-09:00
 EMOJI_ENABLED=true
 TEXT_POSTPROCESS_SEED=20260307
 ENGINE_API_BASE=http://127.0.0.1:8080/
-PHONE_IP=your_adb_device_id_or_ip
-OPEN_CHAT_ACTION=com.example.wechatglm.OPEN_CHAT
-OPEN_CHAT_EXTRA_KEY=wxid
 ```
 
 ## 10. 测试
@@ -478,11 +467,8 @@ python -m pytest
 - `app.py -> GuoguoEngine.ingest_incoming_messages()`
 - `api.py -> /hook/incoming`
 - `api.py -> /hook/pending`
-- `wechat.py -> process_pending_replies()`
 
 如果后面继续演进，最值得做的方向是：
 
 1. 把 pending 队列持久化
-2. 给 Hook / wechat.py 增加 agent_id/account_id 做多账号隔离
 3. 给 `/metrics/reply_policy` 增加按用户维度的统计
-4. 给 `wechat.py` 增加发送失败重入队
