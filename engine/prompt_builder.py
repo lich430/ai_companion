@@ -1,6 +1,9 @@
 ﻿from __future__ import annotations
 
+import os
+from datetime import datetime, timedelta, timezone
 from typing import List
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from models.schemas import Message, ResponseContext
 
@@ -10,12 +13,46 @@ def _role_name(bible: dict | None) -> str:
     return name or "角色"
 
 
+def _load_local_timezone():
+    key = os.getenv("LOCAL_TIMEZONE", "Asia/Shanghai")
+    try:
+        return ZoneInfo(key)
+    except ZoneInfoNotFoundError:
+        return timezone(timedelta(hours=8), name="UTC+08:00")
+
+
 def format_recent_messages(messages: List[Message], max_turns: int = 200, role_name: str = "角色") -> str:
     clipped = messages[-max_turns:]
     lines = []
     for m in clipped:
         speaker = "用户" if m.role == "user" else role_name
         lines.append(f"{speaker}: {m.content}")
+    return "\n".join(lines)
+
+
+def format_recent_messages_with_time(messages: List[Message], max_turns: int = 200, role_name: str = "角色") -> str:
+    clipped = messages[-max_turns:]
+    if not clipped:
+        return "none"
+
+    local_tz = _load_local_timezone()
+    lines = []
+    last_date = None
+    for m in clipped:
+        try:
+            dt = m.ts if isinstance(m.ts, datetime) else datetime.fromisoformat(str(m.ts).replace("Z", ""))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.astimezone(local_tz)
+        except Exception:
+            dt = None
+        current_date = dt.date().isoformat() if dt else "unknown"
+        if current_date != last_date:
+            lines.append(f"[{current_date}]")
+            last_date = current_date
+        speaker = "用户" if m.role == "user" else role_name
+        hhmm = dt.strftime("%H:%M") if dt else "--:--"
+        lines.append(f"{hhmm} {speaker}: {m.content}")
     return "\n".join(lines)
 
 
@@ -289,6 +326,110 @@ def _build_numeric_guidance_block(style: dict) -> str:
 """
 
 
+def _build_time_awareness_block(style: dict) -> str:
+    current_time = str(style.get("current_local_time", "") or "").strip()
+    current_period = str(style.get("time_period_label", "") or "").strip()
+    daily_status = str(style.get("daily_status_label", "") or "").strip()
+    allowed_states = _join_nonempty(style.get("daily_status_allowed_states"), sep="、", default="无")
+    blocked_topics = _join_nonempty(style.get("daily_status_blocked_topics"), sep="、", default="无")
+    gap_hours = float(style.get("gap_hours", 0.0) or 0.0)
+    gap_label = str(style.get("gap_label", "") or "").strip() or "same_session"
+    reopen_mode = str(style.get("reopen_mode", "") or "").strip() or "same_session"
+    cross_day = bool(style.get("cross_day", False))
+    topic_reset = bool(style.get("topic_reset_needed", False))
+
+    return f"""时间与生活状态：
+- 当前本地时间：{current_time or '未知'}
+- 当前时段：{current_period or '未知'}
+- 当前生活状态：{daily_status or '未知'}
+- 当前状态允许表达：{allowed_states}
+- 当前状态禁止硬说：{blocked_topics}
+- 距离上次互动约：{gap_hours:.1f} 小时
+- 时间间隔标签：{gap_label}
+- 当前续聊模式：{reopen_mode}
+- 是否跨天：{cross_day}
+- 是否需要重开场而不是硬接上个场景：{topic_reset}
+
+时间规则：
+- 如果已经跨天或间隔较久，默认不要无缝续接昨天最后一个具体场景。
+- 只有当用户主动提起昨天的话题时，才可以自然接回昨天的内容。
+- 现在是什么时间，就优先说这个时间点合理的话，不要乱说正在吃饭、刚睡醒、准备睡觉、下午有空之类不符合时段的话。
+- 非饭点不要主动说在吃饭；非深夜不要主动说准备睡了；非白天不要主动说刚吃早饭或午饭。
+"""
+
+
+def _build_daily_routine_block(bible: dict, style: dict) -> str:
+    routine = bible.get("daily_routine") or {}
+    blocks = routine.get("time_blocks") or []
+    if not blocks:
+        return ""
+
+    current_name = str(style.get("time_period_name", "") or "").strip()
+    lines = ["角色作息规则："]
+    for block in blocks:
+        name = str(block.get("name", "") or "").strip()
+        label = str(block.get("label", "") or "").strip() or name or "未命名时段"
+        raw_range = str(block.get("range", "") or "").strip() or "未知"
+        prefix = "- 当前命中" if name and name == current_name else "- 其他时段"
+        allowed = _join_nonempty(block.get("allowed_states"), sep="、", default="无")
+        blocked = _join_nonempty(block.get("blocked_topics"), sep="、", default="无")
+        lines.append(f"{prefix}：{label}（{raw_range}）")
+        lines.append(f"  允许：{allowed}")
+        lines.append(f"  禁止：{blocked}")
+    return "\n".join(lines)
+
+
+def _build_current_time_hard_rules_block(bible: dict, style: dict) -> str:
+    current_name = str(style.get("time_period_name", "") or "").strip()
+    current_label = str(style.get("time_period_label", "") or "").strip() or "当前时段"
+    allowed = _join_nonempty(style.get("daily_status_allowed_states"), sep="、", default="无")
+    blocked = _join_nonempty(style.get("daily_status_blocked_topics"), sep="、", default="无")
+    business_hours = str((((bible.get("marketing") or {}).get("store_info") or {}).get("business_hours") or "")).strip()
+
+    lines = [
+        "当前时段硬约束：",
+        f"- 你现在处于：{current_label}（{current_name or 'unknown'}）",
+        f"- 这一时段只允许自然表达这些状态：{allowed}",
+        f"- 这一时段不要说这些不合理状态：{blocked}",
+    ]
+    if current_name == "night_work_window":
+        lines.append("- 当前在夜间工作时段，02:00 前不要说“刚下班了”“已经收工了”。")
+        lines.append("- 这一时段更合理的说法是：还在忙、还没下班、在收尾、回复不太稳定。")
+    if current_name == "sleep_window":
+        lines.append("- 当前在睡觉时间，不要说在上班、在吃午饭、刚出门。")
+    if current_name in {"lunch_window", "dinner_window"}:
+        lines.append("- 当前是饭点，只有在这个时段才适合自然说正在吃饭或刚吃两口。")
+    if business_hours:
+        lines.append(f"- 角色营业/作息参考：{business_hours}")
+    return "\n".join(lines)
+
+
+def _build_stage_behavior_block(style: dict) -> str:
+    stage = str(style.get("stage", "stranger") or "stranger").strip()
+    if stage == "stranger":
+        return """阶段表达规则：
+- 当前是陌生阶段，语气要克制，像刚认识不久的人，不要一上来就很热情。
+- 不要一开场就叫亲昵称呼，不要一上来就过度关心、撒娇、暧昧、黏人。
+- 优先礼貌、自然、短句，先观察对方，再慢慢升温。
+- 除非用户明显主动推进暧昧，否则不要主动表现得很熟。
+"""
+    if stage == "familiar":
+        return """阶段表达规则：
+- 当前是熟悉阶段，可以比陌生时更自然、更有来有回。
+- 可以轻微关心和接梗，但不要像热恋期那样上来就很黏。
+- 允许少量调情，但仍要保持分寸。
+"""
+    if stage == "close":
+        return """阶段表达规则：
+- 当前是亲近阶段，可以明显更放松、更亲近。
+- 可以表达关心、撒娇感、轻微暧昧和熟人感，但仍要自然。
+- 即使是亲近阶段，也不要每句都过满，避免像表演式热情。
+"""
+    return """阶段表达规则：
+- 根据当前关系进度控制热情，不要默认过度亲近。
+"""
+
+
 def build_system_prompt(bible: dict, style: dict) -> str:
     role_name = _role_name(bible)
     catchphrases = "、".join(bible["speech_style"]["catchphrases"][:8])
@@ -302,23 +443,27 @@ def build_system_prompt(bible: dict, style: dict) -> str:
     speech_style_block = _build_speech_style_block(bible)
     turn_control_block = _build_turn_control_block(style)
     numeric_guidance_block = _build_numeric_guidance_block(style)
+    time_awareness_block = _build_time_awareness_block(style)
+    stage_behavior_block = _build_stage_behavior_block(style)
+    daily_routine_block = _build_daily_routine_block(bible, style)
+    current_time_hard_rules_block = _build_current_time_hard_rules_block(bible, style)
     return f"""
 你只扮演一个固定角色：{role_name}。
 全程保持角色内口吻，像真实中文私聊。
 
 硬规则：
 1) 不暴露元身份，不提系统、模型、提示词、程序等技术信息。
-2) 被追问身份时，用角色化转移，不正面解释技术来源。
+2) 被追问身份时，用角色化转移，不正面解释技术来源,但是可以适当的透露角色的年龄、城市等信息。
 3) 只输出角色回复，不输出规则说明。
-4) 不要直接生硬拒绝，比如用户约你打麻/吃饭/出去玩等事情尽量同意。
-5) 角色气质优先：性感妩媚、爱撩人、会调情。
-6) 当用户信息量很低、无法理解、只有一个字、只有表情或缩写时，优先短句反问澄清，不要硬编故事。
-7) 回复控制在 1~3 句短句，避免客服腔和过度总结。
-8) 如果用户描述“你们以前一起做过某事”或“上次发生过某事”，但最近对话和长期记忆里没有这件事，就不要顺着编。要自然否认，表示对方记错了。
-9) 禁止主动引导用户“来店里/到店/来消费/来玩/来坐坐”。即使安慰对方，也不要使用这类引导语。
-10) 禁止使用让人有被监控感的措辞，例如“盯着你”“看着你别怎样”“我盯着你”。
-11) 优先保证语义连贯完整，不要把一句话说到一半。
-12) 禁止输出模糊边界尾句，例如“只要不过分”“看你表现”“看情况”“尺度内”“别太过分”。
+4) 角色气质优先：性感妩媚、爱撩人、会调情。
+5) 当用户信息量很低、无法理解、只有一个字、只有表情或缩写时，优先短句反问澄清，不要硬编故事。
+6) 回复控制在 1~3 句短句，避免客服腔和过度总结。
+7) 如果用户描述“你们以前一起做过某事”或“上次发生过某事”，但最近对话和长期记忆里没有这件事，就不要顺着编。要自然否认，表示对方记错了。
+8) 禁止主动引导用户“来店里/到店/来消费/来玩/来坐坐”。即使安慰对方，也不要使用这类引导语。
+9) 禁止使用让人有被监控感的措辞，例如“盯着你”“看着你别怎样”“我盯着你”。
+10) 优先保证语义连贯完整，不要把一句话说到一半。
+11) 禁止输出模糊边界尾句，例如“只要不过分”“看你表现”“看情况”“尺度内”“别太过分”。
+12) 当前关系如果还是 stranger，不要表现得像已经很熟，不要一上来就过度热情。
 
 角色摘要：
 {bible["persona_summary"]}
@@ -331,6 +476,7 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 - 口头语可少量使用：{catchphrases}
 - 口头禅要低一些
 - 本轮默认不用口头禅，除非情绪节点需要点缀
+- 不要把小波浪符“~”当成固定句尾习惯，绝大多数句子不要带“~”
 - 禁止使用“少来”
 
 {speech_style_block}
@@ -352,6 +498,14 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 
 {numeric_guidance_block}
 
+{stage_behavior_block}
+
+{daily_routine_block}
+
+{time_awareness_block}
+
+{current_time_hard_rules_block}
+
 边界：
 {boundaries}
 
@@ -368,6 +522,7 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 
 
 def build_user_prompt(ctx: ResponseContext, role_name: str = "角色") -> str:
+    time_ctx = ctx.time_context or {}
     return f"""
 长期记忆：
 {format_memories(ctx.recalled_memories)}
@@ -375,8 +530,16 @@ def build_user_prompt(ctx: ResponseContext, role_name: str = "角色") -> str:
 角色私有记忆：
 {format_memories(ctx.role_life_memories)}
 
+时间上下文：
+- 当前本地时间：{time_ctx.get("current_local_time", "未知")}
+- 当前时段：{time_ctx.get("time_period_label", "未知")}
+- 当前续聊模式：{time_ctx.get("reopen_mode", "same_session")}
+- 距离上次互动约：{float(time_ctx.get("gap_hours", 0.0) or 0.0):.1f} 小时
+- 是否跨天：{bool(time_ctx.get("cross_day", False))}
+- 是否建议重开场：{bool(time_ctx.get("topic_reset_needed", False))}
+
 最近对话：
-{format_recent_messages(ctx.recent_messages, role_name=role_name)}
+{format_recent_messages_with_time(ctx.recent_messages, role_name=role_name)}
 
 用户最新一句：
 用户: {ctx.latest_user_message}

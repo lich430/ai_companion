@@ -53,6 +53,7 @@ class ResponseContext:
     state: RelationshipState
     recalled_memories: List[MemoryItem]
     role_life_memories: List[MemoryItem]
+    time_context: dict = field(default_factory=dict)
 
 
 @dataclass

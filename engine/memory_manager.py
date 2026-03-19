@@ -276,6 +276,15 @@ class MemoryManager:
         ).fetchone()
         return str(row[0]) if row and row[0] else None
 
+    def get_last_message_dt(self, user_id: str) -> Optional[datetime]:
+        raw = self.get_last_message_ts(user_id)
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", ""))
+        except Exception:
+            return None
+
     def recall_memories(
         self,
         user_id: str,

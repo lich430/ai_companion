@@ -99,6 +99,7 @@ class CompanionEngine:
             "noreply": 0,
             "quiet_hours": 0,
             "low_context_no_history": 0,
+            "acknowledgement_no_reply": 0,
             "need_no_reply": 0,
             "repeat_spam": 0,
             "hostile_deescalation": 0,
@@ -165,6 +166,78 @@ class CompanionEngine:
             return start <= now_t < end
         return now_t >= start or now_t < end
 
+    @staticmethod
+    def _ensure_aware_utc(dt: datetime | None) -> datetime | None:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt
+
+    def _to_local_dt(self, dt: datetime | None) -> datetime | None:
+        aware = self._ensure_aware_utc(dt)
+        if aware is None:
+            return None
+        return aware.astimezone(self.local_timezone)
+
+    def _find_daily_time_block(self, current: datetime) -> dict:
+        routine = self.bible.get("daily_routine") or {}
+        for block in routine.get("time_blocks") or []:
+            raw = str(block.get("range", "") or "").strip()
+            if not raw or "-" not in raw:
+                continue
+            start_raw, end_raw = raw.split("-", 1)
+            start = self._parse_hhmm(start_raw)
+            end = self._parse_hhmm(end_raw)
+            now_t = current.timetz().replace(tzinfo=None)
+            matched = (start <= now_t < end) if start <= end else (now_t >= start or now_t < end)
+            if matched:
+                return block
+        return {}
+
+    def _build_time_context(self, user_id: str, prior_recent: list[Message], now: datetime | None = None) -> dict:
+        current = (now or datetime.now(self.local_timezone)).astimezone(self.local_timezone)
+        last_message_dt = prior_recent[-1].ts if prior_recent else self.memory.get_last_message_dt(user_id)
+        last_local = self._to_local_dt(last_message_dt)
+        gap_hours = 0.0
+        cross_day = False
+        gap_label = "no_history"
+        reopen_mode = "new_topic"
+
+        if last_local is not None:
+            gap_hours = max(0.0, (current - last_local).total_seconds() / 3600.0)
+            cross_day = current.date() != last_local.date()
+            if cross_day:
+                gap_label = "cross_day"
+                reopen_mode = "cross_day_reopen"
+            elif gap_hours >= 12:
+                gap_label = "long_gap"
+                reopen_mode = "long_gap_reconnect"
+            elif gap_hours >= 3:
+                gap_label = "same_day_gap"
+                reopen_mode = "same_day_reopen"
+            else:
+                gap_label = "same_session"
+                reopen_mode = "same_session"
+
+        block = self._find_daily_time_block(current)
+        topic_reset_needed = reopen_mode in {"cross_day_reopen", "long_gap_reconnect"}
+        return {
+            "current_local_time": current.strftime("%Y-%m-%d %H:%M"),
+            "current_local_date": current.date().isoformat(),
+            "time_period_name": str(block.get("name", "") or "").strip() or "unknown",
+            "time_period_label": str(block.get("label", "") or "").strip() or "普通时段",
+            "daily_status_label": str(block.get("label", "") or "").strip() or "普通时段",
+            "daily_status_allowed_states": [str(x).strip() for x in (block.get("allowed_states") or []) if str(x).strip()],
+            "daily_status_blocked_topics": [str(x).strip() for x in (block.get("blocked_topics") or []) if str(x).strip()],
+            "gap_hours": gap_hours,
+            "gap_label": gap_label,
+            "reopen_mode": reopen_mode,
+            "cross_day": cross_day,
+            "topic_reset_needed": topic_reset_needed,
+            "last_message_local_time": last_local.strftime("%Y-%m-%d %H:%M") if last_local else "",
+        }
+
     def _recommended_delay_ms(self, state: RelationshipState, urgent: bool) -> int:
         if urgent:
             return self.rng.randint(500, 1200)
@@ -199,6 +272,43 @@ class CompanionEngine:
             "hi",
         }
         return plain in greeting_set
+
+    @staticmethod
+    def _is_acknowledgement_message(text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        compact = re.sub(r"\s+", "", raw)
+        plain = re.sub("[^0-9A-Za-z\u4e00-\u9fff]+", "", compact).lower()
+        ack_set = {
+            "嗯嗯",
+            "好的",
+            "好",
+            "知道了",
+            "知道啦",
+            "明白了",
+            "明白",
+            "收到",
+            "ok",
+            "okk",
+            "okay",
+        }
+        return plain in ack_set
+
+    def _should_acknowledgement_noreply(self, text: str, recent: list[Message], cls: dict) -> bool:
+        if cls.get("urgent") or cls.get("hostile"):
+            return False
+        if not self._is_acknowledgement_message(text):
+            return False
+        prior = [m for m in recent[:-1] if m.content.strip()]
+        if not prior:
+            return False
+        last = prior[-1]
+        if last.role != "assistant":
+            return False
+        if "?" in text or "？" in text:
+            return False
+        return True
 
     @staticmethod
     def _marketing_triggered(text: str, bible: dict) -> bool:
@@ -453,7 +563,7 @@ class CompanionEngine:
         self.memory.extract_and_store_user_memory(user_id, user_text)
         return state, recent
 
-    def _build_style(self, user_id: str, state: RelationshipState, user_text: str, cls: dict) -> dict:
+    def _build_style(self, user_id: str, state: RelationshipState, user_text: str, cls: dict, time_context: dict | None = None) -> dict:
         style = self.style_controller.build_style_directives(state)
         style["emoji_enabled"] = self.emoji_enabled
         style["marketing_allowed"] = self._marketing_triggered(user_text, self.bible)
@@ -464,6 +574,7 @@ class CompanionEngine:
             self.bible.get("speech_style", {}).get("forbidden_fillers")
             or ["哎呀", "呀", "呢"]
         )
+        style.update(time_context or {})
         style["short_reply_mode"] = False
         short_cfg = self.bible.get("short_sentence_policy") or {}
         if bool(short_cfg.get("enabled", False)):
@@ -513,10 +624,19 @@ class CompanionEngine:
                 self._last_proactive_ask_turn[user_id] = self._get_turn_count(user_id)
         return out
 
-    def _finalize_reply(self, state: RelationshipState, raw_reply: str, reason: str, urgent: bool) -> ReplyDecision:
+    def _finalize_reply(
+        self,
+        state: RelationshipState,
+        raw_reply: str,
+        reason: str,
+        urgent: bool,
+        time_context: dict | None = None,
+    ) -> ReplyDecision:
         # Keep model output as-is for context consistency.
         processed = (raw_reply or "").strip()
+        processed = self._sanitize_time_conflicts(processed, time_context or {})
         processed = self._sanitize_surveillance_tone(processed)
+        processed = self._sanitize_excessive_tildes(processed)
         if not processed:
             processed = "我在这陪你"
         return ReplyDecision(
@@ -546,6 +666,52 @@ class CompanionEngine:
         return out
 
     @staticmethod
+    def _sanitize_excessive_tildes(text: str) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+        out = re.sub(r"[~～]{2,}", "~", out)
+        parts = [part.strip() for part in re.split(r"\n+", out) if part.strip()]
+        cleaned = []
+        for part in parts:
+            if part.endswith(("~", "～")):
+                body = part.rstrip("~～").strip()
+                if len(body) > 6:
+                    part = body
+                else:
+                    part = f"{body}~" if body else body
+            cleaned.append(part)
+        return "\n".join(cleaned).strip()
+
+    @staticmethod
+    def _sanitize_time_conflicts(text: str, time_context: dict) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+
+        period = str(time_context.get("time_period_name", "") or "").strip()
+        current_time = str(time_context.get("current_local_time", "") or "").strip()
+
+        # During the night work window, avoid saying the role has already clocked off.
+        if period == "night_work_window":
+            hour = None
+            minute = 0
+            if current_time:
+                try:
+                    hhmm = current_time.split(" ", 1)[1]
+                    hour = int(hhmm.split(":", 1)[0])
+                    minute = int(hhmm.split(":", 1)[1])
+                except Exception:
+                    hour = None
+            before_two_am = hour is None or (hour < 2 or (hour == 2 and minute == 0))
+            if before_two_am:
+                out = re.sub(r"(这个点|这会儿|这时候)?才?下班了", "这会儿还在忙", out)
+                out = re.sub(r"刚下班", "刚忙完一阵", out)
+                out = re.sub(r"(已经|都)?收工了", "还没收工", out)
+                out = re.sub(r"下班[。.!！?？]*$", "还没下班", out)
+        return out.strip()
+
+    @staticmethod
     def _sanitize_forbidden_invite(text: str) -> str:
         out = (text or "").strip()
         if not out:
@@ -570,6 +736,57 @@ class CompanionEngine:
         return out
 
     @staticmethod
+    def _normalize_phrase_anchor(text: str) -> str:
+        return re.sub(r"[^\u4e00-\u9fff0-9A-Za-z]+", "", (text or "")).strip().lower()
+
+    def _extract_phrase_anchors(self, text: str) -> list[str]:
+        parts = [x.strip() for x in re.split(r"[，。！？!?,\n]", text or "") if x.strip()]
+        anchors: list[str] = []
+        skip_prefixes = {
+            "你好",
+            "哈喽",
+            "在吗",
+            "你呢",
+            "好的",
+            "是吗",
+            "哈哈",
+            "我在",
+            "行啊",
+        }
+        for part in parts:
+            norm = self._normalize_phrase_anchor(part)
+            if len(norm) < 4:
+                continue
+            anchor = norm[:6]
+            if anchor[:2] in skip_prefixes or anchor in skip_prefixes:
+                continue
+            anchors.append(anchor)
+        return anchors
+
+    def _has_recent_phrase_repetition(self, candidate: str, recent: list[Message], window: int = 20) -> bool:
+        candidate_anchors = self._extract_phrase_anchors(candidate)
+        if not candidate_anchors:
+            return False
+
+        assistant_recent = [m.content for m in recent[-window:] if m.role == "assistant" and m.content.strip()]
+        if not assistant_recent:
+            return False
+
+        history_anchors = set()
+        history_texts = [self._normalize_phrase_anchor(text) for text in assistant_recent]
+        for text in assistant_recent:
+            for anchor in self._extract_phrase_anchors(text):
+                history_anchors.add(anchor)
+
+        for anchor in candidate_anchors:
+            if anchor in history_anchors:
+                return True
+            for hist in history_texts:
+                if len(anchor) >= 4 and anchor in hist:
+                    return True
+        return False
+
+    @staticmethod
     def _split_short_reply(text: str, max_chars: int = 10) -> str:
         raw = (text or "").strip()
         if not raw:
@@ -581,7 +798,15 @@ class CompanionEngine:
             return compact
         return compact[:max_chars].rstrip("，。！？,.!?;；:：")
 
-    def _generate_single_text(self, user_id: str, user_text: str, state: RelationshipState, recent: list[Message], cls: dict) -> str:
+    def _generate_single_text(
+        self,
+        user_id: str,
+        user_text: str,
+        state: RelationshipState,
+        recent: list[Message],
+        cls: dict,
+        time_context: dict | None = None,
+    ) -> str:
         if self.identity_guard.is_identity_probe(user_text):
             return self.identity_guard.get_reply(user_id=user_id, stage=state.stage)
         if self._should_deny_unverified_history() and self._looks_like_shared_history_claim(user_text) and not self._has_supporting_shared_history(user_text, recent):
@@ -607,8 +832,9 @@ class CompanionEngine:
             state=state,
             recalled_memories=recalled,
             role_life_memories=role_life,
+            time_context=(time_context or {}),
         )
-        style = self._build_style(user_id, state, user_text, cls)
+        style = self._build_style(user_id, state, user_text, cls, time_context=time_context)
 
         for _ in range(5):
             candidate = self.generator.generate(self.bible, style, ctx)
@@ -616,6 +842,8 @@ class CompanionEngine:
             if self._leaks_ai_identity(candidate):
                 continue
             if self._is_hostile_reply(candidate):
+                continue
+            if self._has_recent_phrase_repetition(candidate, recent, window=20):
                 continue
             if not self.rep_guard.is_repetitive(user_id, candidate):
                 return candidate
@@ -643,6 +871,7 @@ class CompanionEngine:
         state: RelationshipState,
         recent: list[Message],
         cls: dict,
+        time_context: dict | None = None,
         max_replies: int = 3,
     ) -> list[str]:
         latest_text = latest_user_messages[-1]
@@ -671,8 +900,9 @@ class CompanionEngine:
             state=state,
             recalled_memories=recalled,
             role_life_memories=role_life,
+            time_context=(time_context or {}),
         )
-        style = self._build_style(user_id, state, latest_text, cls)
+        style = self._build_style(user_id, state, latest_text, cls, time_context=time_context)
         if max_replies <= 1:
             reply_rule = """
 额外任务：
@@ -709,12 +939,14 @@ class CompanionEngine:
                     continue
                 if self._is_hostile_reply(reply):
                     continue
+                if self._has_recent_phrase_repetition(reply, recent, window=20):
+                    continue
                 if self.rep_guard.is_repetitive(user_id, reply):
                     continue
                 cleaned.append(reply)
             if cleaned:
                 return cleaned
-        return [self._generate_single_text(user_id, latest_text, state, recent, cls)]
+        return [self._generate_single_text(user_id, latest_text, state, recent, cls, time_context=time_context)]
 
     def _record_assistant_reply(self, user_id: str, reply: str):
         self.rep_guard.add_reply(user_id, reply)
@@ -730,7 +962,9 @@ class CompanionEngine:
         incoming_text = (user_text or "").strip()
         cls = classify_user_message(incoming_text)
         is_greeting = self._is_greeting_message(incoming_text)
-        had_context_before = self._has_recent_context(self._get_recent(user_id))
+        prior_recent = list(self._get_recent(user_id))
+        had_context_before = self._has_recent_context(prior_recent)
+        time_context = self._build_time_context(user_id, prior_recent)
 
         self.turn_counts[user_id] = self._get_turn_count(user_id) + 1
         self.memory.set_turn_count(user_id, self.turn_counts[user_id])
@@ -741,6 +975,8 @@ class CompanionEngine:
             decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")
         elif (not is_greeting) and self._is_repeated_user_spam(recent, incoming_texts=[incoming_text]):
             decision = self._build_repeat_spam_decision()
+        elif self._should_acknowledgement_noreply(incoming_text, recent, cls):
+            decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="acknowledgement_no_reply")
         elif (not is_greeting) and cls["low_context"] and not had_context_before:
             decision = ReplyDecision(
                 type="reply",
@@ -754,14 +990,21 @@ class CompanionEngine:
                 self._probe_then_comfort_reply(),
                 "emotion_probe_then_comfort",
                 urgent=False,
+                time_context=time_context,
             )
         elif self._should_force_noreply(recent, cls):
             decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="need_no_reply")
         elif cls["hostile"] and not cls["urgent"]:
-            decision = self._finalize_reply(state, self._soft_deescalation_reply(), "hostile_deescalation", urgent=False)
+            decision = self._finalize_reply(
+                state,
+                self._soft_deescalation_reply(),
+                "hostile_deescalation",
+                urgent=False,
+                time_context=time_context,
+            )
         else:
-            text = self._generate_single_text(user_id, incoming_text, state, recent, cls)
-            decision = self._finalize_reply(state, text, "reply", urgent=cls["urgent"])
+            text = self._generate_single_text(user_id, incoming_text, state, recent, cls, time_context=time_context)
+            decision = self._finalize_reply(state, text, "reply", urgent=cls["urgent"], time_context=time_context)
 
         if decision.type == "reply" and decision.text:
             self._record_assistant_reply(user_id, decision.text)
@@ -856,7 +1099,9 @@ class CompanionEngine:
             return {"ok": False, "reason": "empty_message"}
         is_greeting_batch = all(self._is_greeting_message(text) for text in cleaned)
 
-        had_context_before = self._has_recent_context(self._get_recent(uid))
+        prior_recent = list(self._get_recent(uid))
+        had_context_before = self._has_recent_context(prior_recent)
+        time_context = self._build_time_context(uid, prior_recent)
         classifications = [classify_user_message(text) for text in cleaned]
         combined = {
             "low_context": all(item["low_context"] for item in classifications),
@@ -880,6 +1125,8 @@ class CompanionEngine:
             decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")]
         elif (not is_greeting_batch) and self._is_repeated_user_spam(recent, incoming_texts=cleaned):
             decisions = [self._build_repeat_spam_decision()]
+        elif len(cleaned) == 1 and self._should_acknowledgement_noreply(cleaned[0], recent, combined):
+            decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="acknowledgement_no_reply")]
         elif (not is_greeting_batch) and combined["low_context"] and not had_context_before:
             decisions = [
                 ReplyDecision(
@@ -896,12 +1143,21 @@ class CompanionEngine:
                     self._probe_then_comfort_reply(),
                     "emotion_probe_then_comfort",
                     urgent=False,
+                    time_context=time_context,
                 )
             ]
         elif self._should_force_noreply(recent, combined):
             decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="need_no_reply")]
         elif combined["hostile"] and not combined["urgent"]:
-            decisions = [self._finalize_reply(state, self._soft_deescalation_reply(), "hostile_deescalation", urgent=False)]
+            decisions = [
+                self._finalize_reply(
+                    state,
+                    self._soft_deescalation_reply(),
+                    "hostile_deescalation",
+                    urgent=False,
+                    time_context=time_context,
+                )
+            ]
         else:
             allow_multi = combined["urgent"] or (self.rng.random() < self.multi_reply_probability)
             raw_replies = self._generate_multi_replies(
@@ -910,9 +1166,19 @@ class CompanionEngine:
                 state=state,
                 recent=recent,
                 cls=combined,
+                time_context=time_context,
                 max_replies=(max(2, self.max_batch_replies) if allow_multi else 1),
             )
-            decisions = [self._finalize_reply(state, reply, "reply", urgent=combined["urgent"]) for reply in raw_replies]
+            decisions = [
+                self._finalize_reply(
+                    state,
+                    reply,
+                    "reply",
+                    urgent=combined["urgent"],
+                    time_context=time_context,
+                )
+                for reply in raw_replies
+            ]
 
         with self._pending_lock:
             for decision in decisions:
