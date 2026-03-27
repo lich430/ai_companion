@@ -417,6 +417,21 @@ class CompanionEngine:
         if self._contains_any(latest, ["带点能玩的进来", "带点能玩的", "能玩的进来", "能玩不给小费", "不给小费"]):
             return "放心 不能玩不给小费"
 
+        if self._contains_any(latest, ["美女多吗", "美女多不多"]) and self._contains_any(latest, ["朋友", "去玩", "过去玩", "晚上"]):
+            return "很多呀 要不要我给你留个包厢"
+
+        if self._contains_any(latest, ["真空"]) and self._contains_any(latest, ["和上次一样", "上次一样"]):
+            return "可以呀 那我在公司等你"
+
+        if self._contains_any(latest, ["出去的美女", "有没有出去的", "能跟我出去的"]):
+            return "有 你们自己沟通 我也可以协助你沟通"
+
+        if self._contains_any(latest, ["我们需要2个", "需要2个", "钱不是问题", "换地方玩了"]):
+            return "没问题 来了和我们经理说"
+
+        if self._contains_any(latest, ["玩的开放", "玩得开放", "没意思呀"]) and self._contains_any(latest, ["?", "？", "男的"]):
+            return "那是自然的 肯定让你玩的高兴"
+
         if room_type and (party_size or self._contains_any(latest, ["给我留", "留个", "留一间", "开个"])):
             room_label = room_type if room_type != "包厢" else "包厢"
             if party_size:
@@ -916,6 +931,7 @@ class CompanionEngine:
         processed = self._sanitize_robotic_drink_reply(processed)
         processed = self._sanitize_conversion_blockers(processed, latest_user_text, time_context or {})
         processed = self._sanitize_time_conflicts(processed, time_context or {})
+        processed = self._sanitize_hard_rejection(processed, latest_user_text, state)
         processed = self._sanitize_surveillance_tone(processed)
         processed = self._sanitize_excessive_tildes(processed)
         recent_msgs = recent or []
@@ -932,6 +948,23 @@ class CompanionEngine:
             recommended_delay_ms=self._recommended_delay_ms(state, urgent=urgent),
             reason=reason,
         )
+
+    @staticmethod
+    def _sanitize_hard_rejection(text: str, latest_user_text: str, state: RelationshipState | None = None) -> str:
+        out = (text or '').strip()
+        latest = (latest_user_text or '').strip()
+        if not out or not latest:
+            return out
+
+        is_stranger = bool(state and getattr(state, 'stage', '') == 'stranger')
+        invite_tokens = ['跟我走', '跟我回去', '带走你', '跟我睡', '睡觉', '出去喝酒', '带你出去']
+        if not any(token in latest for token in invite_tokens):
+            return out
+
+        hard_patterns = ['只陪喝酒唱歌', '别想歪', '别想了', '不行', '没有', '来不了']
+        if is_stranger and any(token in out for token in hard_patterns):
+            return '我们刚认识不久，我还不了解你，以后看你表现。'
+        return out
 
     @staticmethod
     def _sanitize_surveillance_tone(text: str) -> str:
