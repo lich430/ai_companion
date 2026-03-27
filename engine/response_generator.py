@@ -159,9 +159,10 @@ class GLMResponseGenerator(BaseResponseGenerator):
 
 
 class OpenAIResponseGenerator(BaseResponseGenerator):
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
+    def __init__(self, api_key: str, model: str = "gpt-4o-mini", base_url: str | None = None):
         super().__init__(api_key=api_key, model=model)
-        self.url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/") + "/chat/completions"
+        root = str(base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).strip()
+        self.url = root.rstrip("/") + "/chat/completions"
 
     def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.85) -> str:
         self._log_request("openai", system_prompt, user_prompt)

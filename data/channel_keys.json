@@ -16,10 +16,12 @@
     },
     "Mkt9P2": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "cc1833b15b064138abe35da22bd7f5df.LRln8ObcmKjYYTMX",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Mkt9P2.db"
+      "memory_db_path": "memory_Mkt9P2.db",
+      "llm_provider": "openai",
+      "openai_api_key": "b5876f47-2a36-45b1-826e-e12b4e6b54a9",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215"
     },
     "Rly7Q1": {
       "role_bible_path": "data/honey_bible.json",

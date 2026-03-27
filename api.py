@@ -115,13 +115,26 @@ def _get_hook_engine(key: str) -> CompanionEngine | None:
         if cached is not None:
             return cached
         role_bible_path = str(conf.get("role_bible_path", "") or "").strip()
+        llm_provider = str(conf.get("llm_provider", "") or os.getenv("LLM_PROVIDER", "glm")).strip().lower()
         glm_api_key = str(conf.get("glm_api_key", "") or "").strip()
-        if not role_bible_path or not glm_api_key:
+        openai_api_key = str(conf.get("openai_api_key", "") or "").strip()
+        if not role_bible_path:
             return None
+        if llm_provider == "openai":
+            if not openai_api_key:
+                return None
+            chat_model = str(conf.get("openai_chat_model", "") or os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")).strip()
+        else:
+            llm_provider = "glm"
+            if not glm_api_key:
+                return None
+            chat_model = str(conf.get("glm_chat_model", "") or os.getenv("GLM_CHAT_MODEL", "glm-4.7")).strip()
         engine = CompanionEngine(
-            llm_provider="glm",
+            llm_provider=llm_provider,
             glm_api_key=glm_api_key,
-            chat_model=str(conf.get("glm_chat_model", "") or os.getenv("GLM_CHAT_MODEL", "glm-4.7")).strip(),
+            openai_api_key=openai_api_key,
+            openai_base_url=str(conf.get("openai_base_url", "") or os.getenv("OPENAI_BASE_URL", "")).strip(),
+            chat_model=chat_model,
             embed_model=str(conf.get("glm_embed_model", "") or os.getenv("GLM_EMBED_MODEL", "embedding-3")).strip(),
             role_bible_path=role_bible_path,
             memory_db_path=str(conf.get("memory_db_path", "") or _memory_db_for_key(key_text)).strip(),

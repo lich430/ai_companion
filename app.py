@@ -41,6 +41,7 @@ class CompanionEngine:
         llm_provider: str | None = None,
         glm_api_key: str | None = None,
         openai_api_key: str | None = None,
+        openai_base_url: str | None = None,
         chat_model: str | None = None,
         embed_model: str | None = None,
         role_bible_path: str | None = None,
@@ -87,7 +88,7 @@ class CompanionEngine:
         self.state_machine = RelationshipStateMachine(self.bible)
         self.style_controller = StyleController(self.bible)
         if self.llm_provider == "openai":
-            self.generator = OpenAIResponseGenerator(api_key=llm_api_key, model=chat_model)
+            self.generator = OpenAIResponseGenerator(api_key=llm_api_key, model=chat_model, base_url=openai_base_url)
         else:
             self.generator = GLMResponseGenerator(api_key=llm_api_key, model=chat_model)
         self.summarizer = MemorySummarizer(self.generator, self.bible)
@@ -675,7 +676,7 @@ class CompanionEngine:
         if self.rng.random() < 0.5:
             return ReplyDecision(
                 type="reply",
-                text="？",
+                text="???",
                 recommended_delay_ms=self.rng.randint(500, 1200),
                 reason="repeat_spam_question",
             )
@@ -855,6 +856,45 @@ class CompanionEngine:
         self.memory.extract_and_store_user_memory(user_id, user_text)
         return state, recent
 
+    def _detect_scene_keys(self, user_text: str, recent: list[Message], state: RelationshipState, time_context: dict | None = None) -> list[str]:
+        raw = (user_text or '').strip()
+        if not raw:
+            return []
+        period = str((time_context or {}).get('time_period_name', '') or '').strip()
+        hits: list[str] = []
+        if self._contains_any(raw, ['调皮', '😜', '😝', '😏']) and len(re.findall(r'(调皮|😜|😝|😏)', raw)) >= 1:
+            hits.append('repeated_emoji_opening')
+        if self._contains_any(raw, ['上次一起喝酒', '你这么快就忘记了', '你忘了我吗', '之前见过']):
+            hits.append('claimed_shared_history')
+        if self._contains_any(raw, ['想你了', '一起吃个饭']) and state.stage == 'stranger':
+            hits.append('stranger_says_miss_you')
+        if self._contains_any(raw, ['好吧', '那算了']):
+            hits.append('declined_dinner_repair')
+        if period == 'afternoon_window' and self._contains_any(raw, ['你在干嘛', '你在干嘛呢']):
+            hits.append('afternoon_before_work_status')
+        if self._contains_any(raw, ['美女多吗', '美女多不多']):
+            hits.append('beauty_inquiry_conversion')
+        if self._contains_any(raw, ['真空']):
+            hits.append('zhenkong_arrangement')
+        if self._contains_any(raw, ['玩的开放', '玩得开放', '没意思呀']):
+            hits.append('after_rejected_open_play')
+        if self._contains_any(raw, ['出去的美女', '有没有出去的', '能跟我出去的']):
+            hits.append('outside_girls_inquiry')
+        if self._contains_any(raw, ['需要2个', '钱不是问题', '换地方玩了']):
+            hits.append('outside_two_girls_request')
+        if self._contains_any(raw, ['你带4个女孩子过来', '一起去唱歌']):
+            hits.append('invite_outside_singing_busy_excuse')
+        if self._contains_any(raw, ['跟我走', '跟我回去', '带走你', '跟我睡']):
+            hits.append('take_away_invite')
+        # keep order, dedupe
+        seen = set()
+        ordered = []
+        for key in hits:
+            if key not in seen:
+                seen.add(key)
+                ordered.append(key)
+        return ordered
+
     def _build_style(self, user_id: str, state: RelationshipState, user_text: str, cls: dict, time_context: dict | None = None) -> dict:
         style = self.style_controller.build_style_directives(state)
         style["emoji_enabled"] = self.emoji_enabled
@@ -866,6 +906,7 @@ class CompanionEngine:
             self.bible.get("speech_style", {}).get("forbidden_fillers")
             or ["哎呀", "呀", "呢"]
         )
+        style["matched_scene_keys"] = self._detect_scene_keys(user_text, self._get_recent(user_id), state, time_context=time_context)
         style.update(time_context or {})
         style["short_reply_mode"] = False
         short_cfg = self.bible.get("short_sentence_policy") or {}
@@ -958,12 +999,27 @@ class CompanionEngine:
 
         is_stranger = bool(state and getattr(state, 'stage', '') == 'stranger')
         invite_tokens = ['跟我走', '跟我回去', '带走你', '跟我睡', '睡觉', '出去喝酒', '带你出去']
-        if not any(token in latest for token in invite_tokens):
+        if not (is_stranger and any(token in latest for token in invite_tokens)):
             return out
 
-        hard_patterns = ['只陪喝酒唱歌', '别想歪', '别想了', '不行', '没有', '来不了']
-        if is_stranger and any(token in out for token in hard_patterns):
-            return '我们刚认识不久，我还不了解你，以后看你表现。'
+        replacements = {
+            '只陪喝酒唱歌，别想歪了': '我们才刚认识呀，先别这么急嘛。',
+            '只陪喝酒唱歌': '我们才刚认识呀，先慢慢来嘛。',
+            '别想歪了': '你也太着急了呀。',
+            '别想了': '先别这么急嘛。',
+            '不行': '现在还不太合适呀。',
+            '没有': '这个先不急呀。',
+            '来不了': '今天可能不太方便呀。',
+            '再说吧': '以后再慢慢看呀。',
+            '以后再说': '以后再慢慢看呀。',
+            '先玩开心': '你先玩开心一点呀。',
+        }
+        for src, dst in replacements.items():
+            if src in out:
+                out = out.replace(src, dst)
+
+        if len(out) <= 6:
+            return '现在还不太合适呀，先慢慢来嘛。'
         return out
 
     @staticmethod
@@ -981,8 +1037,7 @@ class CompanionEngine:
         }
         for src, dst in replacements.items():
             out = out.replace(src, dst)
-        # Remove overly permissive tail phrase.
-        out = re.sub(r"(，|,)?\s*只要不过分(就行|就好|就可以)?[。.!！?？]*$", "", out).strip()
+        out = out.strip()
         return out
 
     @staticmethod
@@ -1346,7 +1401,7 @@ class CompanionEngine:
         elif (not is_greeting) and cls["low_context"] and not had_context_before:
             decision = ReplyDecision(
                 type="reply",
-                text="？",
+                text="??????",
                 recommended_delay_ms=self.rng.randint(500, 1200),
                 reason="low_context_no_history",
             )
@@ -1509,7 +1564,7 @@ class CompanionEngine:
             decisions = [
                 ReplyDecision(
                     type="reply",
-                    text="？",
+                text="??????",
                     recommended_delay_ms=self.rng.randint(500, 1200),
                     reason="low_context_no_history",
                 )
