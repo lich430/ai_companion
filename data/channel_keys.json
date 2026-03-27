@@ -1,0 +1,123 @@
+{
+  "keys": {
+    "Tyu8G7": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "fde74dcf1f1446597106d0dd360a434.GV6tL7MrYohq2vKl",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Tyu8G7.db"
+    },
+    "Hny4K8": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "a8a74eb5e1f743579653310c73baa255.ACXboMXfiBpXUhEE",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Hny4K8.db"
+    },
+    "Mkt9P2": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "cc1833b15b064138abe35da22bd7f5df.LRln8ObcmKjYYTMX",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Mkt9P2.db"
+    },
+    "Rly7Q1": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "cc1833b15b064138abe35da22bd7f5df.LRln8ObcmKjYYTMX",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Rly7Q1.db"
+    },
+    "Bar6N3": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "4c980865409341ec83cdb912b93c0157.P9fSRHXKjaxsAz45",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Bar6N3.db"
+    },
+    "Lxr5D2": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "a0eeddb7c0104f9fa2836840b58632a0.D0OBSOIWXaEsrI90",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Lxr5D2.db"
+    },
+    "Pmn8Q4": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "6545de09309b45c687bc653a4092a0f7.HxVmahT3nVoi7Mat",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Pmn8Q4.db"
+    },
+    "Vrt3K6": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "2db8ba4a97d942df9e1088aaa92e2adf.UTRrBjktI0brSpWw",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Vrt3K6.db"
+    },
+    "Sya7M1": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "8623d3ae8a774fd799207b1f427f01e1.mPqdZIUdQoWkBNfk",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Sya7M1.db"
+    },
+    "Qvo2T8": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "c793d963ad42401f9cfc7c25df2c6454.WQCr2FStbtJglCoq",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Qvo2T8.db"
+    },
+    "Nke6R4": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "22dffb96a9914580828bd492803f0398.RKce6y1ikPqDn8wJ",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Nke6R4.db"
+    },
+    "Bxf9H3": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "045339018ed543bda25c027114f4679e.C6GuDxIMgzEIyeXD",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Bxf9H3.db"
+    },
+    "Zpr4L7": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "8e13556898bb4d25b9d8cae5ef8eaf5c.TmvGbN8ozPF0VgNv",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Zpr4L7.db"
+    },
+    "Cwm8J2": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "d025eea8e73942d3af9189616805facd.cwEeA7DZJjAJBAzc",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Cwm8J2.db"
+    },
+    "Nul5X9": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "ce8f3216e9b24bfa9da1c7e8d49120e3.NU7eZgnJ2S6d1KaL",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Nul5X9.db"
+    },
+    "Kav3R6": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "ce8f3216e9b24bfa9da1c7e8d49120e3.NU7eZgnJ2S6d1KaL",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Kav3R6.db"
+    },
+    "Gib7P1": {
+      "role_bible_path": "data/honey_bible.json",
+      "glm_api_key": "e039f1f747e841498b83531550f5eda9.5gBi4fPgZiKy2IBZ",
+      "glm_chat_model": "glm-5",
+      "glm_embed_model": "embedding-3",
+      "memory_db_path": "memory_Gib7P1.db"
+    }
+  }
+}

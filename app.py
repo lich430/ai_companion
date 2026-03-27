@@ -35,16 +35,26 @@ class CompanionEngine:
         except ZoneInfoNotFoundError:
             return timezone(timedelta(hours=8), name="UTC+08:00")
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        llm_provider: str | None = None,
+        glm_api_key: str | None = None,
+        openai_api_key: str | None = None,
+        chat_model: str | None = None,
+        embed_model: str | None = None,
+        role_bible_path: str | None = None,
+        memory_db_path: str | None = None,
+    ):
         load_dotenv()
-        self.llm_provider = os.getenv("LLM_PROVIDER", "glm").strip().lower()
-        glm_api_key = os.getenv("GLM_API_KEY", "")
-        openai_api_key = os.getenv("OPENAI_API_KEY", "")
-        chat_model = os.getenv("GLM_CHAT_MODEL", "glm-4.7")
-        embed_model = os.getenv("GLM_EMBED_MODEL", "embedding-3")
+        self.llm_provider = str(llm_provider or os.getenv("LLM_PROVIDER", "glm")).strip().lower()
+        glm_api_key = str(glm_api_key if glm_api_key is not None else os.getenv("GLM_API_KEY", "")).strip()
+        openai_api_key = str(openai_api_key if openai_api_key is not None else os.getenv("OPENAI_API_KEY", "")).strip()
+        chat_model = str(chat_model if chat_model is not None else os.getenv("GLM_CHAT_MODEL", "glm-4.7")).strip()
+        embed_model = str(embed_model if embed_model is not None else os.getenv("GLM_EMBED_MODEL", "embedding-3")).strip()
         llm_api_key = glm_api_key
         if self.llm_provider == "openai":
-            chat_model = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+            chat_model = str(chat_model or os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")).strip()
             llm_api_key = openai_api_key
         elif self.llm_provider != "glm":
             raise RuntimeError("Unsupported LLM_PROVIDER. Use 'glm' or 'openai'.")
@@ -66,13 +76,14 @@ class CompanionEngine:
         lexical_th = float(os.getenv("LEXICAL_REPEAT_THRESHOLD", "0.72"))
         semantic_th = float(os.getenv("SEMANTIC_REPEAT_THRESHOLD", "0.90"))
 
-        self.role_bible_path = os.getenv("ROLE_BIBLE_PATH", "data/guoguo_bible.json")
+        self.role_bible_path = str(role_bible_path or os.getenv("ROLE_BIBLE_PATH", "data/guoguo_bible.json")).strip()
         self.bible = BibleLoader(self.role_bible_path).load()
         self.role_name = str(self.bible.get("name", "") or "").strip() or "unknown"
         self.role_id = str(self.bible.get("role_id", "") or "").strip() or "unknown"
         self.embedding = EmbeddingService(api_key=glm_api_key, model=embed_model)
         self.identity_guard = IdentityGuard("data/identity_deflection_templates.json")
-        self.memory = MemoryManager("memory.db", embedding_service=self.embedding)
+        self.memory_db_path = str(memory_db_path or "memory.db").strip() or "memory.db"
+        self.memory = MemoryManager(self.memory_db_path, embedding_service=self.embedding)
         self.state_machine = RelationshipStateMachine(self.bible)
         self.style_controller = StyleController(self.bible)
         if self.llm_provider == "openai":
@@ -316,6 +327,272 @@ class CompanionEngine:
         triggers = marketing.get("triggers") or []
         raw = (text or "").strip()
         return any(str(trigger).strip() and str(trigger) in raw for trigger in triggers)
+
+    @staticmethod
+    def _contains_any(text: str, tokens: list[str]) -> bool:
+        raw = (text or "").strip()
+        return any(token and token in raw for token in tokens)
+
+    @staticmethod
+    def _extract_party_size(text: str) -> int | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        m = re.search(r"(\d+)\s*个?人", raw)
+        if m:
+            try:
+                return int(m.group(1))
+            except Exception:
+                return None
+        cn_map = {
+            "一个人": 1,
+            "两个人": 2,
+            "二个人": 2,
+            "三个人": 3,
+            "四个人": 4,
+            "五个人": 5,
+            "六个人": 6,
+            "七个人": 7,
+            "八个人": 8,
+            "九个人": 9,
+            "十个人": 10,
+        }
+        for key, value in cn_map.items():
+            if key in raw:
+                return value
+        return None
+
+    @staticmethod
+    def _extract_room_type(text: str) -> str:
+        raw = (text or "").strip()
+        for room in ["小包", "中包", "大包", "包厢"]:
+            if room in raw:
+                return room
+        return ""
+
+    @staticmethod
+    def _extract_eta_phrase(text: str) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return ""
+        patterns = [
+            r"(差不多.{0,8}(分钟|个小时))",
+            r"((大概|大约).{0,8}(分钟|个小时))",
+            r"((四十|三十|二十|十|\d+).{0,4}分钟)",
+            r"((一|两|二|三|\d+).{0,2}个小时)",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, raw)
+            if m:
+                return m.group(1)
+        return ""
+
+    def _build_sales_template_reply(self, latest_text: str, recent: list[Message], time_context: dict) -> str | None:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return None
+
+        period = str(time_context.get("time_period_name", "") or "").strip()
+        if period not in {"night_work_window", "dinner_window"}:
+            return None
+
+        prior_messages = recent[:-1] if recent else []
+        last_assistant = next((m.content.strip() for m in reversed(prior_messages) if m.role == "assistant" and m.content.strip()), "")
+        party_size = self._extract_party_size(latest)
+        room_type = self._extract_room_type(latest)
+        eta = self._extract_eta_phrase(latest)
+
+        if self._contains_any(latest, ["在不在公司", "在公司吗", "在店里吗", "在店吗", "在不在店"]):
+            return "在公司呢"
+
+        if self._contains_any(latest, ["你从事什么工作", "你做什么工作", "做什么工作", "你是做什么的", "你在什么公司", "做什么的"]):
+            return "我在夜场上班 平时陪客人喝酒聊天 也会帮忙订房安排包厢"
+
+        if self._contains_any(latest, ["今天晚上过去玩", "晚上过去玩", "过去玩", "过去喝酒", "来喝酒", "过来喝酒"]):
+            return "好 你们几个人"
+
+        if self._contains_any(latest, ["今天能不能送点酒", "能不能送点酒", "送点酒", "送酒"]):
+            return "可以 到时候你点一些 我送一点"
+
+        if self._contains_any(latest, ["带点能玩的进来", "带点能玩的", "能玩的进来", "能玩不给小费", "不给小费"]):
+            return "放心 不能玩不给小费"
+
+        if room_type and (party_size or self._contains_any(latest, ["给我留", "留个", "留一间", "开个"])):
+            room_label = room_type if room_type != "包厢" else "包厢"
+            if party_size:
+                return f"嗯嗯 {room_label}给你们留着 你们几点到"
+            return f"嗯嗯 {room_label}可以给你留 你们几点到"
+
+        if eta or self._contains_any(latest, ["快结束了", "一会到", "差不多到了", "四十分钟", "半小时", "一个小时"]):
+            return "好的 快到了给我发信息 我去门口接你们"
+
+        if party_size and self._contains_any(last_assistant, ["几个人"]):
+            return f"{party_size}个人的话给你们安排 你想留小包还是中包"
+
+        if room_type and self._contains_any(last_assistant, ["几点到", "到店时间"]):
+            room_label = room_type if room_type != "包厢" else "包厢"
+            return f"好 {room_label}先给你留着 你们快到了跟我说"
+
+        if self._contains_any(latest, ["订房", "开包厢", "留个包", "留位", "安排一下"]):
+            return "可以 你们几个人 我先给你安排"
+
+        return None
+
+    @staticmethod
+    def _normalize_lookup_text(text: str) -> str:
+        return re.sub(r"[\s\-\(\)（）·,，。！？!?:：/]+", "", (text or "")).strip().lower()
+
+    def _get_drink_catalog(self) -> dict[str, list[dict]]:
+        marketing = self.bible.get("marketing") or {}
+        store_info = marketing.get("store_info") or {}
+        drink_info = store_info.get("drink_info") or {}
+        catalog = drink_info.get("drink_catalog") or {}
+        return catalog if isinstance(catalog, dict) else {}
+
+    def _find_drink_item(self, text: str) -> tuple[str, dict] | tuple[None, None]:
+        normalized = self._normalize_lookup_text(text)
+        if not normalized:
+            return None, None
+        for category, items in self._get_drink_catalog().items():
+            for item in items or []:
+                names = [str(item.get("name", "")).strip()] + [str(x).strip() for x in (item.get("aliases") or []) if str(x).strip()]
+                for name in names:
+                    if not name:
+                        continue
+                    if self._normalize_lookup_text(name) in normalized:
+                        return str(category), item
+        return None, None
+
+    def _find_drink_candidates(self, text: str) -> list[tuple[str, dict]]:
+        normalized = self._normalize_lookup_text(text)
+        out: list[tuple[str, dict]] = []
+        if not normalized:
+            return out
+        for category, items in self._get_drink_catalog().items():
+            for item in items or []:
+                names = [str(item.get("name", "")).strip()] + [str(x).strip() for x in (item.get("aliases") or []) if str(x).strip()]
+                if any(self._normalize_lookup_text(name) and self._normalize_lookup_text(name) in normalized for name in names):
+                    out.append((str(category), item))
+        return out
+
+    def _infer_drink_category(self, text: str) -> str:
+        raw = (text or "").strip()
+        if any(token in raw for token in ["洋酒", "威士忌", "白兰地", "马爹利", "轩尼诗", "黑方", "芝华士"]):
+            return "洋酒"
+        if any(token in raw for token in ["红酒", "葡萄酒", "奔富"]):
+            return "红酒"
+        if "啤酒" in raw:
+            return "啤酒"
+        if any(token in raw for token in ["饮料", "水", "红茶", "绿茶", "脉动"]):
+            return "饮料"
+        return ""
+
+    @staticmethod
+    def _format_catalog_item(item: dict) -> str:
+        name = str(item.get("name", "")).strip()
+        unit = str(item.get("unit", "")).strip()
+        price = item.get("price", "")
+        price_text = str(int(price)) if isinstance(price, (int, float)) and float(price).is_integer() else str(price).strip()
+        return f"{name}{price_text}元/{unit}".strip("/")
+
+    @staticmethod
+    def _format_short_price(item: dict) -> str:
+        price = item.get("price", "")
+        unit = str(item.get("unit", "")).strip() or "瓶"
+        price_text = str(int(price)) if isinstance(price, (int, float)) and float(price).is_integer() else str(price).strip()
+        return f"{price_text}元/{unit}"
+
+    def _list_catalog_by_category(self, category: str) -> str:
+        items = self._get_drink_catalog().get(category) or []
+        return "、".join(self._format_catalog_item(item) for item in items[:8] if item.get("name"))
+
+    def _build_drink_menu_reply(self, user_text: str, recent: list[Message] | None = None) -> str | None:
+        raw = (user_text or "").strip()
+        if not raw:
+            return None
+
+        catalog = self._get_drink_catalog()
+        if not catalog:
+            return None
+
+        history = recent or []
+        prior_messages = history[:-1] if history and history[-1].role == "user" and history[-1].content.strip() == raw else history
+        last_assistant = next((m.content.strip() for m in reversed(prior_messages) if m.role == "assistant" and m.content.strip()), "")
+        last_user = next((m.content.strip() for m in reversed(prior_messages) if m.role == "user" and m.content.strip()), "")
+        context_query = last_user if ("详细介绍" in last_assistant or "细说" in last_assistant or "发下酒单" in last_assistant) else raw
+
+        query_for_parse = context_query if ("详细介绍" in last_assistant or "细说" in last_assistant or "发下酒单" in last_assistant) else raw
+        matched_category, matched_item = self._find_drink_item(context_query)
+        matched_candidates = self._find_drink_candidates(context_query)
+        asked_specific = bool(re.search(r"(有(?!什么).{1,12}吗|有没有.{1,12}|能点.{1,12}吗|能不能点.{1,12})", query_for_parse))
+        asked_menu = (
+            any(token in query_for_parse for token in ["有什么酒", "都有什么酒", "酒单", "酒水单", "酒水", "有什么喝的", "能喝什么"])
+            or bool(re.search(r"有什么(洋酒|红酒|啤酒|饮料)", query_for_parse))
+            or bool(re.search(r"有(洋酒|红酒|啤酒|饮料)吗", query_for_parse))
+        )
+        asked_detail = (
+            any(token in raw for token in ["详细", "细说", "具体", "介绍一下", "都说下", "全部", "价格", "酒单发我", "发来看看"])
+            or (self._is_acknowledgement_message(raw) and ("详细介绍" in last_assistant or "细说" in last_assistant or "发下酒单" in last_assistant))
+            or raw in {"需要", "你说", "发我看看", "说说看"}
+        )
+        inferred_category = self._infer_drink_category(context_query)
+        if any(token in raw for token in ["多少钱一箱", "一箱多少钱", "一箱多钱", "啤酒多少一箱", "纯生多少一箱", "雪花多少一箱"]):
+            marketing = self.bible.get("marketing") or {}
+            store_info = marketing.get("store_info") or {}
+            drink_info = store_info.get("drink_info") or {}
+            beer_box = str(drink_info.get("beer", "") or "").strip()
+            if beer_box:
+                return f"啤酒一箱{beer_box}"
+            return "啤酒一箱一千多"
+
+        if asked_specific and len(matched_candidates) >= 2:
+            price_text = "、".join(self._format_short_price(item) for _, item in matched_candidates[:2])
+            return f"有 {price_text}"
+
+        if matched_item and asked_specific:
+            return f"有 {self._format_short_price(matched_item)}"
+
+        if asked_specific and not matched_item:
+            return "没有"
+
+        if asked_menu and asked_detail:
+            target_categories = [inferred_category] if inferred_category and inferred_category in catalog else [x for x in ["洋酒", "红酒", "啤酒"] if x in catalog]
+            if inferred_category == "饮料":
+                target_categories = ["饮料"]
+            lines = []
+            for category in target_categories:
+                listing = self._list_catalog_by_category(category)
+                if listing:
+                    lines.append(f"{category}有{listing}")
+            if "饮料" in catalog and (inferred_category == "饮料" or "饮料" in raw):
+                listing = self._list_catalog_by_category("饮料")
+                if listing:
+                    lines.append(f"饮料有{listing}")
+            return "\n".join(lines[:3]) if lines else None
+
+        if matched_item:
+            return f"有 {self._format_short_price(matched_item)}"
+
+        if asked_menu:
+            if inferred_category and inferred_category in catalog:
+                return f"有 {inferred_category}这边都能点"
+            return "有的 洋酒红酒啤酒这些都有"
+
+        return None
+
+    @staticmethod
+    def _sanitize_robotic_drink_reply(text: str) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+        out = out.replace("需要给你详细介绍一下吗?", "")
+        out = out.replace("需要给你详细介绍一下吗？", "")
+        out = out.replace("要不要我给你详细说下价格", "")
+        out = out.replace("要不要我给你详细说下", "")
+        out = re.sub(r"\n{2,}", "\n", out)
+        out = re.sub(r"[ \t]{2,}", " ", out)
+        out = re.sub(r"\n\s*$", "", out).strip()
+        return out
 
     def _should_force_noreply(self, recent: list[Message], cls: dict) -> bool:
         if cls.get("urgent"):
@@ -631,12 +908,22 @@ class CompanionEngine:
         reason: str,
         urgent: bool,
         time_context: dict | None = None,
+        latest_user_text: str = "",
+        recent: list[Message] | None = None,
     ) -> ReplyDecision:
         # Keep model output as-is for context consistency.
         processed = (raw_reply or "").strip()
+        processed = self._sanitize_robotic_drink_reply(processed)
+        processed = self._sanitize_conversion_blockers(processed, latest_user_text, time_context or {})
         processed = self._sanitize_time_conflicts(processed, time_context or {})
         processed = self._sanitize_surveillance_tone(processed)
         processed = self._sanitize_excessive_tildes(processed)
+        recent_msgs = recent or []
+        last_assistant = next((m.content.strip() for m in reversed(recent_msgs) if m.role == "assistant" and m.content.strip()), "")
+        if last_assistant and processed == last_assistant:
+            price_reply = self._build_drink_menu_reply(latest_user_text, recent=recent_msgs)
+            if price_reply and price_reply != processed:
+                processed = price_reply
         if not processed:
             processed = "我在这陪你"
         return ReplyDecision(
@@ -710,6 +997,40 @@ class CompanionEngine:
                 out = re.sub(r"(已经|都)?收工了", "还没收工", out)
                 out = re.sub(r"下班[。.!！?？]*$", "还没下班", out)
         return out.strip()
+
+    @staticmethod
+    def _sanitize_conversion_blockers(text: str, latest_user_text: str, time_context: dict) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+
+        latest = (latest_user_text or "").strip()
+        period = str(time_context.get("time_period_name", "") or "").strip()
+        high_intent = any(
+            token in latest
+            for token in ["过去", "来喝酒", "喝喝酒", "留个小包", "小包", "订房", "开包厢", "你陪我", "安排", "一个人"]
+        )
+        active_period = period in {"night_work_window", "dinner_window"}
+        if not (high_intent and active_period):
+            return out
+
+        replacements = {
+            "但我还在忙，不一定": "可以啊，你过来我给你留个小包",
+            "我还在忙，不一定": "你过来就行，我给你留个小包",
+            "我还在忙": "这会儿在店里，你过来就行",
+            "不一定": "可以安排",
+            "有空陪你聊": "你到了我陪你喝两杯",
+            "有空再说": "你来我给你安排",
+            "改天吧": "今晚过来就行",
+            "现在不方便": "现在可以安排，你过来提前和我说一声",
+        }
+        for src, dst in replacements.items():
+            out = out.replace(src, dst)
+
+        out = re.sub(r"(但|不过)?我还在忙[,，]?所以?", "", out).strip(" ，,")
+        out = re.sub(r"(到时候|回头|再说|看情况)", "我给你安排", out)
+        out = re.sub(r"\s{2,}", " ", out).strip()
+        return out
 
     @staticmethod
     def _sanitize_forbidden_invite(text: str) -> str:
@@ -807,6 +1128,12 @@ class CompanionEngine:
         cls: dict,
         time_context: dict | None = None,
     ) -> str:
+        drink_menu_reply = self._build_drink_menu_reply(user_text, recent=recent)
+        if drink_menu_reply:
+            return drink_menu_reply
+        template_reply = self._build_sales_template_reply(user_text, recent, time_context or {})
+        if template_reply:
+            return template_reply
         if self.identity_guard.is_identity_probe(user_text):
             return self.identity_guard.get_reply(user_id=user_id, stage=state.stage)
         if self._should_deny_unverified_history() and self._looks_like_shared_history_claim(user_text) and not self._has_supporting_shared_history(user_text, recent):
@@ -875,6 +1202,12 @@ class CompanionEngine:
         max_replies: int = 3,
     ) -> list[str]:
         latest_text = latest_user_messages[-1]
+        drink_menu_reply = self._build_drink_menu_reply(latest_text, recent=recent)
+        if drink_menu_reply:
+            return [drink_menu_reply]
+        template_reply = self._build_sales_template_reply(latest_text, recent, time_context or {})
+        if template_reply:
+            return [template_reply]
         if self.identity_guard.is_identity_probe(latest_text):
             return [self.identity_guard.get_reply(user_id=user_id, stage=state.stage)]
         if self._should_deny_unverified_history() and self._looks_like_shared_history_claim(latest_text) and not self._has_supporting_shared_history(latest_text, recent):
@@ -991,6 +1324,8 @@ class CompanionEngine:
                 "emotion_probe_then_comfort",
                 urgent=False,
                 time_context=time_context,
+                latest_user_text=incoming_text,
+                recent=recent,
             )
         elif self._should_force_noreply(recent, cls):
             decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="need_no_reply")
@@ -1001,10 +1336,20 @@ class CompanionEngine:
                 "hostile_deescalation",
                 urgent=False,
                 time_context=time_context,
+                latest_user_text=incoming_text,
+                recent=recent,
             )
         else:
             text = self._generate_single_text(user_id, incoming_text, state, recent, cls, time_context=time_context)
-            decision = self._finalize_reply(state, text, "reply", urgent=cls["urgent"], time_context=time_context)
+            decision = self._finalize_reply(
+                state,
+                text,
+                "reply",
+                urgent=cls["urgent"],
+                time_context=time_context,
+                latest_user_text=incoming_text,
+                recent=recent,
+            )
 
         if decision.type == "reply" and decision.text:
             self._record_assistant_reply(user_id, decision.text)
@@ -1144,6 +1489,8 @@ class CompanionEngine:
                     "emotion_probe_then_comfort",
                     urgent=False,
                     time_context=time_context,
+                    latest_user_text=cleaned[-1],
+                    recent=recent,
                 )
             ]
         elif self._should_force_noreply(recent, combined):
@@ -1156,6 +1503,8 @@ class CompanionEngine:
                     "hostile_deescalation",
                     urgent=False,
                     time_context=time_context,
+                    latest_user_text=cleaned[-1],
+                    recent=recent,
                 )
             ]
         else:
@@ -1176,6 +1525,8 @@ class CompanionEngine:
                     "reply",
                     urgent=combined["urgent"],
                     time_context=time_context,
+                    latest_user_text=cleaned[-1],
+                    recent=recent,
                 )
                 for reply in raw_replies
             ]

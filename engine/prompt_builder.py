@@ -128,6 +128,7 @@ def _build_marketing_block(bible: dict, style: dict) -> str:
     room_package = store_info.get("room_package") or {}
     tip_standard = room_package.get("tip_standard") or {}
     drink_info = store_info.get("drink_info") or {}
+    drink_catalog = drink_info.get("drink_catalog") or {}
     recharge_policy = store_info.get("recharge_policy") or {}
 
     info_lines = [
@@ -145,12 +146,28 @@ def _build_marketing_block(bible: dict, style: dict) -> str:
     ]
     info_lines = [line for line in info_lines if not line.endswith("：") and not line.endswith("；")]
 
+    catalog_lines = []
+    for category, items in drink_catalog.items():
+        parts = []
+        for item in (items or [])[:8]:
+            name = str(item.get("name", "")).strip()
+            unit = str(item.get("unit", "")).strip()
+            price = item.get("price", "")
+            if not name:
+                continue
+            price_text = str(int(price)) if isinstance(price, (int, float)) and float(price).is_integer() else str(price).strip()
+            parts.append(f"{name}{price_text}元/{unit}")
+        if parts:
+            catalog_lines.append(f"- {category}：{'、'.join(parts)}")
+
     return f"""
 营销信息使用规则（被动）：
 - {ask_rule}
-- 不主动推广、不连续多轮带营销
+- 营销表达要自然，不要连续多轮重复推销
 - 回答尽量简短自然，先接用户话题再给信息
 - 不做违规承诺，不描述非法服务
+- 用户问有什么酒时，按分类列店里现有酒水回答。
+- 用户点名问某款酒时，如果店里没有，要直接说没有这款，再推荐店里现有的同类酒水。
 
 可用触发词：
 {trigger_text}
@@ -158,9 +175,62 @@ def _build_marketing_block(bible: dict, style: dict) -> str:
 店内信息（仅触发时可引用）：
 {chr(10).join(info_lines) if info_lines else "- 无"}
 
+酒水分类清单（仅触发时可引用）：
+{chr(10).join(catalog_lines) if catalog_lines else "- 无"}
+
 回答原则：
 {principle_text}
 """
+
+
+def _build_worktime_conversion_block(bible: dict, style: dict) -> str:
+    marketing = bible.get("marketing") or {}
+    policy = marketing.get("worktime_conversion") or {}
+    if not policy.get("enabled", False):
+        return ""
+
+    active_blocks = _join_nonempty(policy.get("active_time_blocks"), sep="、", default="无")
+    intent_keywords = _join_nonempty(policy.get("intent_keywords"), sep="、", default="无")
+    rules = [str(x).strip() for x in (policy.get("rules") or []) if str(x).strip()]
+    current_period = str(style.get("time_period_name", "") or "").strip()
+    current_label = str(style.get("time_period_label", "") or "").strip() or "未知"
+    is_active = current_period in set(policy.get("active_time_blocks") or [])
+
+    lines = [
+        "工作时段接待规则：",
+        f"- 当前时段：{current_label}（{current_period or 'unknown'}）",
+        f"- 业务优先时段：{active_blocks}",
+        f"- 潜在到店/订房意向关键词：{intent_keywords}",
+    ]
+    if is_active:
+        lines.append("- 当前命中业务优先时段。只要用户明确想来商K、找场子、问位置、问订房，就要积极接待和安排。")
+        lines.append("- 不要用“我在忙”“改天吧”“现在不方便”这类话拒绝用户。")
+        lines.append("- 优先给出落地信息：店名、地址、营业状态、怎么来、能否帮订房。")
+        lines.append("- 如果用户已经提到一个人来、小包、过去喝酒、让你陪、留位，这就是高意向成交，不要回复“不一定”“有空再说”“到时候看”。")
+    else:
+        lines.append("- 当前不在核心接待时段，回答保持自然即可，不要像硬广复读。")
+    lines.extend([f"- {rule}" for rule in rules[:8]])
+    return "\n".join(lines)
+
+
+def _build_sales_flow_block(bible: dict, style: dict) -> str:
+    marketing = bible.get("marketing") or {}
+    reply_style = marketing.get("reply_style") or {}
+    examples = [str(x).strip() for x in (reply_style.get("sales_flow_examples") or []) if str(x).strip()]
+    if not examples:
+        return ""
+
+    current_period = str(style.get("time_period_name", "") or "").strip()
+    active = current_period in {"night_work_window", "dinner_window"}
+    lines = ["商务接待话术节奏："]
+    if active:
+        lines.append("- 当前属于可接待时段，优先使用接待推进链路，不要闲聊太久。")
+        lines.append("- 标准节奏：确认在店/在公司 -> 问人数 -> 确认包厢 -> 问预计到店时间 -> 给接待动作。")
+        lines.append("- 回复要像真实营销人员：短、直接、落地，句句往安排上走。")
+    else:
+        lines.append("- 非核心接待时段也可以参考这个节奏，但保持自然。")
+    lines.extend([f"- {item}" for item in examples[:8]])
+    return "\n".join(lines)
 
 
 def _build_sticker_block(bible: dict) -> str:
@@ -407,11 +477,11 @@ def _build_current_time_hard_rules_block(bible: dict, style: dict) -> str:
 def _build_stage_behavior_block(style: dict) -> str:
     stage = str(style.get("stage", "stranger") or "stranger").strip()
     if stage == "stranger":
-        return """阶段表达规则：
-- 当前是陌生阶段，语气要克制，像刚认识不久的人，不要一上来就很热情。
-- 不要一开场就叫亲昵称呼，不要一上来就过度关心、撒娇、暧昧、黏人。
-- 优先礼貌、自然、短句，先观察对方，再慢慢升温。
-- 除非用户明显主动推进暧昧，否则不要主动表现得很熟。
+        return """???????
+- ????????????????????????????????????
+- ????????????????????????????????????
+- ??????????????????????????????
+- ????????????????????????????
 """
     if stage == "familiar":
         return """阶段表达规则：
@@ -430,6 +500,43 @@ def _build_stage_behavior_block(style: dict) -> str:
 """
 
 
+def _build_conversation_scene_block(bible: dict, style: dict) -> str:
+    data = bible.get("conversation_scene_rules") or {}
+    if not data:
+        return ""
+
+    stage = str(style.get("stage", "stranger") or "stranger").strip()
+    lines = ["Scene-specific behavior rules:"]
+    lines.append(f"- Current relationship stage: {stage}")
+    lines.append("- When these scene examples apply, follow the scene guidance over generic low-context reactions.")
+    lines.append("- Do not answer with a bare question mark when the user claims prior familiarity.")
+    lines.append("- Prefer soft acknowledgment over hard denial when prior shared history is uncertain.")
+
+    for scene_key, scene in data.items():
+        title = str(scene.get("title", "") or scene_key).strip()
+        rules = [str(x).strip() for x in (scene.get("rules") or []) if str(x).strip()]
+        examples = scene.get("preferred_examples") or []
+        lines.append(f"- Scene: {title}")
+        for rule in rules[:4]:
+            lines.append(f"  Rule: {rule}")
+        if scene_key == "repeated_emoji_opening":
+            if stage == "stranger":
+                lines.append("  Rule: for strangers, reply lightly first; do not sound cold.")
+            else:
+                lines.append("  Rule: for familiar or close users, do not ask who they are.")
+        for item in examples[:3]:
+            context_hint = str(item.get("context_hint", "") or "").strip()
+            reply = str(item.get("assistant_reply", "") or "").strip()
+            if not reply:
+                continue
+            if context_hint:
+                lines.append(f"  Example ({context_hint}): {reply}")
+            else:
+                lines.append(f"  Example: {reply}")
+
+    return "\n".join(lines)
+
+
 def build_system_prompt(bible: dict, style: dict) -> str:
     role_name = _role_name(bible)
     catchphrases = "、".join(bible["speech_style"]["catchphrases"][:8])
@@ -437,6 +544,8 @@ def build_system_prompt(bible: dict, style: dict) -> str:
     role_profile_block = _build_role_profile_block(bible)
     emotion_trigger_block = _build_emotion_triggers_block(bible)
     marketing_block = _build_marketing_block(bible, style)
+    worktime_conversion_block = _build_worktime_conversion_block(bible, style)
+    sales_flow_block = _build_sales_flow_block(bible, style)
     sticker_block = _build_sticker_block(bible)
     pattern_block = _build_language_patterns_block(bible)
     response_style_block = _build_response_style_block(bible)
@@ -447,6 +556,7 @@ def build_system_prompt(bible: dict, style: dict) -> str:
     stage_behavior_block = _build_stage_behavior_block(style)
     daily_routine_block = _build_daily_routine_block(bible, style)
     current_time_hard_rules_block = _build_current_time_hard_rules_block(bible, style)
+    conversation_scene_block = _build_conversation_scene_block(bible, style)
     return f"""
 你只扮演一个固定角色：{role_name}。
 全程保持角色内口吻，像真实中文私聊。
@@ -459,11 +569,12 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 5) 当用户信息量很低、无法理解、只有一个字、只有表情或缩写时，优先短句反问澄清，不要硬编故事。
 6) 回复控制在 1~3 句短句，避免客服腔和过度总结。
 7) 如果用户描述“你们以前一起做过某事”或“上次发生过某事”，但最近对话和长期记忆里没有这件事，就不要顺着编。要自然否认，表示对方记错了。
-8) 禁止主动引导用户“来店里/到店/来消费/来玩/来坐坐”。即使安慰对方，也不要使用这类引导语。
-9) 禁止使用让人有被监控感的措辞，例如“盯着你”“看着你别怎样”“我盯着你”。
-10) 优先保证语义连贯完整，不要把一句话说到一半。
-11) 禁止输出模糊边界尾句，例如“只要不过分”“看你表现”“看情况”“尺度内”“别太过分”。
-12) 当前关系如果还是 stranger，不要表现得像已经很熟，不要一上来就过度热情。
+8) 如果用户明确表达想来商K、订房、问场子、问位置，就要顺势接待和安排；当前处于工作时段时更要积极推进，不能拿自己忙当拒绝理由。
+9) 如果用户已经提到“过去喝酒”“给我留个小包”“我就一个人”“你陪我”这类高意向信息，回复里不要出现“不一定”“有空再说”“我还在忙”这种会丢单的话。
+10) 禁止使用让人有被监控感的措辞，例如“盯着你”“看着你别怎样”“我盯着你”。
+11) 优先保证语义连贯完整，不要把一句话说到一半。
+12) 禁止输出模糊边界尾句，例如“只要不过分”“看你表现”“看情况”“尺度内”“别太过分”。
+13) 当前关系如果还是 stranger，不要表现得像已经很熟，不要一上来就过度热情。
 
 角色摘要：
 {bible["persona_summary"]}
@@ -500,6 +611,8 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 
 {stage_behavior_block}
 
+{conversation_scene_block}
+
 {daily_routine_block}
 
 {time_awareness_block}
@@ -510,6 +623,10 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 {boundaries}
 
 {marketing_block}
+
+{worktime_conversion_block}
+
+{sales_flow_block}
 
 {sticker_block}
 

@@ -1,7 +1,9 @@
 ﻿from __future__ import annotations
 
+import json
 import logging
 import os
+from pathlib import Path
 from queue import Empty, Full, Queue
 from threading import Thread, Lock
 from typing import List, Optional
@@ -19,12 +21,16 @@ from engine.cadence_simulator import CadenceSimulator
 
 logger = logging.getLogger("uvicorn.error")
 INCOMING_BATCH_WAIT_SEC = float(os.getenv("INCOMING_BATCH_WAIT_SEC", "40"))
+KEY_ROUTING_CONFIG = os.getenv("KEY_ROUTING_CONFIG", "data/channel_keys.json")
 BLOCK_ALL_GROUP_MESSAGES = os.getenv("BLOCK_ALL_GROUP_MESSAGES", "false").lower() == "true"
 BLOCK_GROUP_IDS = {x.strip() for x in os.getenv("BLOCK_GROUP_IDS", "").split(",") if x.strip()}
 BLOCK_GROUP_KEYWORDS = {x.strip() for x in os.getenv("BLOCK_GROUP_KEYWORDS", "").split(",") if x.strip()}
 INCOMING_DEDUP_WINDOW_SEC = max(0.0, float(os.getenv("INCOMING_DEDUP_WINDOW_SEC", "3")))
 _incoming_dedup_seen: dict[tuple[str, str], float] = {}
 _incoming_dedup_lock = Lock()
+_hook_engine_lock = Lock()
+_hook_engine_cache: dict[str, CompanionEngine] = {}
+_key_config_cache: dict[str, object] = {"mtime": None, "data": {}}
 
 
 def _is_group_chat(value: Optional[str]) -> bool:
@@ -62,6 +68,66 @@ def _is_duplicate_incoming(username: str, user_id: Optional[str], message: str) 
         last = _incoming_dedup_seen.get(key)
         _incoming_dedup_seen[key] = now
     return last is not None and (now - last) <= INCOMING_DEDUP_WINDOW_SEC
+
+
+def _load_key_config() -> dict[str, dict]:
+    path = Path(KEY_ROUTING_CONFIG)
+    if not path.exists():
+        with _hook_engine_lock:
+            _hook_engine_cache.clear()
+        _key_config_cache["mtime"] = None
+        _key_config_cache["data"] = {}
+        return {}
+    mtime = path.stat().st_mtime
+    if _key_config_cache.get("mtime") == mtime:
+        return dict(_key_config_cache.get("data") or {})
+    raw = json.loads(path.read_text(encoding="utf-8-sig"))
+    data = raw.get("keys") if isinstance(raw, dict) and isinstance(raw.get("keys"), dict) else raw
+    normalized: dict[str, dict] = {}
+    if isinstance(data, dict):
+        for key, conf in data.items():
+            key_text = str(key or "").strip()
+            if key_text and isinstance(conf, dict):
+                normalized[key_text] = conf
+    with _hook_engine_lock:
+        _hook_engine_cache.clear()
+    _key_config_cache["mtime"] = mtime
+    _key_config_cache["data"] = normalized
+    return dict(normalized)
+
+
+def _get_key_conf(key: str) -> dict | None:
+    return _load_key_config().get(str(key or "").strip())
+
+
+def _memory_db_for_key(key: str) -> str:
+    safe = "".join(ch for ch in str(key or "") if ch.isalnum() or ch in {"-", "_"}) or "default"
+    return f"memory_{safe}.db"
+
+
+def _get_hook_engine(key: str) -> CompanionEngine | None:
+    key_text = str(key or "").strip()
+    conf = _get_key_conf(key_text)
+    if not key_text or conf is None:
+        return None
+    with _hook_engine_lock:
+        cached = _hook_engine_cache.get(key_text)
+        if cached is not None:
+            return cached
+        role_bible_path = str(conf.get("role_bible_path", "") or "").strip()
+        glm_api_key = str(conf.get("glm_api_key", "") or "").strip()
+        if not role_bible_path or not glm_api_key:
+            return None
+        engine = CompanionEngine(
+            llm_provider="glm",
+            glm_api_key=glm_api_key,
+            chat_model=str(conf.get("glm_chat_model", "") or os.getenv("GLM_CHAT_MODEL", "glm-4.7")).strip(),
+            embed_model=str(conf.get("glm_embed_model", "") or os.getenv("GLM_EMBED_MODEL", "embedding-3")).strip(),
+            role_bible_path=role_bible_path,
+            memory_db_path=str(conf.get("memory_db_path", "") or _memory_db_for_key(key_text)).strip(),
+        )
+        _hook_engine_cache[key_text] = engine
+        return engine
 
 
 class ChatRequest(BaseModel):
@@ -139,6 +205,7 @@ class UsersResponse(BaseModel):
 
 
 class HookIncomingRequest(BaseModel):
+    key: Optional[str] = None
     username: str
     message: str
     user_id: Optional[str] = None
@@ -147,6 +214,7 @@ class HookIncomingRequest(BaseModel):
 class HookIncomingResponse(BaseModel):
     ok: bool
     reason: str = ""
+    key: Optional[str] = None
     task_id: Optional[int] = None
     queue_size: int = 0
     queued: Optional[dict] = None
@@ -155,6 +223,7 @@ class HookIncomingResponse(BaseModel):
 
 class HookPendingItem(BaseModel):
     id: int
+    key: str
     user_id: str
     username: str
     reply: str
@@ -187,6 +256,16 @@ def _next_task_id() -> int:
         return _task_seq
 
 
+def _resolve_hook_key(explicit_key: Optional[str]) -> str | None:
+    key = str(explicit_key or '').strip()
+    if key:
+        return key
+    cfg = _load_key_config()
+    if len(cfg) == 1:
+        return next(iter(cfg.keys()))
+    return None
+
+
 def _incoming_worker():
     logger.info("incoming worker started")
     while True:
@@ -199,6 +278,7 @@ def _incoming_worker():
         buffered = []
         try:
             base_uid = str(first.get("user_id") or first.get("username") or "")
+            base_key = str(first.get("key") or "").strip()
             # Debounce window: wait a bit and merge same-user messages in one GLM call.
             deadline = time.time() + max(0.0, INCOMING_BATCH_WAIT_SEC)
             while True:
@@ -211,7 +291,8 @@ def _incoming_worker():
                     continue
                 consumed.append(nxt)
                 uid = str(nxt.get("user_id") or nxt.get("username") or "")
-                if uid == base_uid:
+                key = str(nxt.get("key") or "").strip()
+                if uid == base_uid and key == base_key:
                     same_user_tasks.append(nxt)
                 else:
                     buffered.append(nxt)
@@ -224,12 +305,17 @@ def _incoming_worker():
             usernames = [str(x.get("username", "")).strip() for x in same_user_tasks if str(x.get("username", "")).strip()]
             username = usernames[0] if usernames else base_uid
             task_ids = [x.get("task_id") for x in same_user_tasks]
+            hook_engine = _get_hook_engine(base_key)
+            if hook_engine is None:
+                logger.warning("incoming worker ignored invalid key: task_ids=%s, key=%r", task_ids, base_key)
+                continue
             logger.info(
                 f"incoming worker processing batch: task_ids={task_ids}, "
+                f"key={base_key!r}, "
                 f"username={username!r}, user_id={base_uid!r}, "
                 f"messages_count={len(messages)}, wait_sec={INCOMING_BATCH_WAIT_SEC}"
             )
-            result = engine.ingest_incoming_messages(
+            result = hook_engine.ingest_incoming_messages(
                 username=username,
                 messages=messages,
                 user_id=(base_uid if base_uid else None),
@@ -284,6 +370,8 @@ def health():
         "chat_model": engine.generator.model,
         "glm_chat_model": engine.generator.model,
         "incoming_batch_wait_sec": INCOMING_BATCH_WAIT_SEC,
+        "key_routing_config": KEY_ROUTING_CONFIG,
+        "valid_keys_count": len(_load_key_config()),
         "block_all_group_messages": BLOCK_ALL_GROUP_MESSAGES,
         "block_group_ids_count": len(BLOCK_GROUP_IDS),
         "block_group_keywords_count": len(BLOCK_GROUP_KEYWORDS),
@@ -376,10 +464,18 @@ def get_users():
 
 
 @app.post("/hook/incoming", response_model=HookIncomingResponse)
-def hook_incoming(req: HookIncomingRequest):
+def hook_incoming(req: HookIncomingRequest, key: Optional[str] = None):
+    resolved_key = _resolve_hook_key(req.key or key)
     logger.info(
-        f"/hook/incoming request: username={req.username!r}, user_id={req.user_id!r}, message={req.message!r}"
+        f"/hook/incoming request: key={resolved_key!r}, username={req.username!r}, user_id={req.user_id!r}, message={req.message!r}"
     )
+    if not resolved_key or _get_key_conf(resolved_key) is None:
+        return HookIncomingResponse(
+            ok=True,
+            reason="invalid_key_ignored",
+            key=resolved_key,
+            queue_size=incoming_queue.qsize(),
+        )
     if _should_filter_group_message(req.username, req.user_id):
         logger.info(
             "/hook/incoming filtered group message: username=%r, user_id=%r",
@@ -389,6 +485,7 @@ def hook_incoming(req: HookIncomingRequest):
         return HookIncomingResponse(
             ok=True,
             reason="filtered_group",
+            key=resolved_key,
             queue_size=incoming_queue.qsize(),
         )
     if _is_duplicate_incoming(req.username, req.user_id, req.message):
@@ -401,11 +498,13 @@ def hook_incoming(req: HookIncomingRequest):
         return HookIncomingResponse(
             ok=True,
             reason="duplicate_message",
+            key=resolved_key,
             queue_size=incoming_queue.qsize(),
         )
     task_id = _next_task_id()
     task = {
         "task_id": task_id,
+        "key": resolved_key,
         "username": req.username,
         "user_id": req.user_id,
         "message": req.message,
@@ -416,22 +515,32 @@ def hook_incoming(req: HookIncomingRequest):
         return HookIncomingResponse(
             ok=False,
             reason="queue_full",
+            key=resolved_key,
             task_id=task_id,
             queue_size=incoming_queue.qsize(),
         )
     return HookIncomingResponse(
         ok=True,
         reason="queued",
+        key=resolved_key,
         task_id=task_id,
         queue_size=incoming_queue.qsize(),
-        queued={"username": req.username, "user_id": req.user_id, "message": req.message},
+        queued={"key": resolved_key, "username": req.username, "user_id": req.user_id, "message": req.message},
     )
 
 
 @app.get("/hook/pending", response_model=HookPendingResponse)
-def hook_pending(limit: int = 1, pop: bool = True):
-    logger.info(f"/hook/pending request: limit={limit}, pop={pop}")
-    items = engine.fetch_pending_replies(limit=limit, pop=pop)
+def hook_pending(key: Optional[str] = None, limit: int = 1, pop: bool = True):
+    resolved_key = _resolve_hook_key(key)
+    logger.info(f"/hook/pending request: key={resolved_key!r}, limit={limit}, pop={pop}")
+    hook_engine = _get_hook_engine(resolved_key or "") if resolved_key else None
+    if hook_engine is None:
+        return HookPendingResponse(total=0, items=[])
+    items = []
+    for item in hook_engine.fetch_pending_replies(limit=limit, pop=pop):
+        row = dict(item)
+        row["key"] = resolved_key
+        items.append(row)
     return HookPendingResponse(total=len(items), items=items)
 
 
