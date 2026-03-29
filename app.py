@@ -618,7 +618,7 @@ class CompanionEngine:
             return "你过来玩，我可以给你介绍开放一点的女孩子"
 
         if self._contains_any(latest, ["妹子质量怎么样", "妹子质量咋样", "质量怎么样"]):
-            return "最新来了很多漂亮的新人"
+            return "最近来了很多漂亮的新人"
 
         if self._contains_any(latest, ["妹妹都是多大的", "妹子都是多大的", "多大"]):
             return "基本18到20左右"
@@ -782,10 +782,11 @@ class CompanionEngine:
         )
         inferred_category = self._infer_drink_category(raw)
 
+        # Broad menu/category questions are better handled by the model with the
+        # injected store catalog in prompt. Keep deterministic rules only for
+        # exact item/box-price lookups.
         if asked_menu:
-            if inferred_category and inferred_category in catalog:
-                return f"有 {inferred_category}这边都能点"
-            return "有的 洋酒红酒啤酒这些都有"
+            return None
 
         if asked_specific and len(matched_candidates) >= 2:
             price_text = "、".join(self._format_short_price(item) for _, item in matched_candidates[:2])
@@ -1564,9 +1565,8 @@ class CompanionEngine:
         return [self._generate_single_text(user_id, latest_text, state, recent, cls, time_context=time_context)]
 
     def _build_priority_template_reply(self, latest_text: str, recent: list[Message], time_context: dict | None = None) -> tuple[str | None, str | None]:
-        template_reply = self._build_sales_template_reply(latest_text, recent, time_context or {})
-        if template_reply:
-            return template_reply, "sales_template"
+        # Let the model handle most conversational and sales decisions via prompt.
+        # Keep only a narrow set of deterministic factual drink lookups here.
         drink_menu_reply = self._build_drink_menu_reply(latest_text, recent=recent)
         if drink_menu_reply:
             return drink_menu_reply, "drink_menu"

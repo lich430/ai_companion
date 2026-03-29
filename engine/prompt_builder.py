@@ -217,7 +217,8 @@ def _build_sales_flow_block(bible: dict, style: dict) -> str:
     marketing = bible.get("marketing") or {}
     reply_style = marketing.get("reply_style") or {}
     examples = [str(x).strip() for x in (reply_style.get("sales_flow_examples") or []) if str(x).strip()]
-    if not examples:
+    pricing_guidance = [str(x).strip() for x in (reply_style.get("pricing_guidance") or []) if str(x).strip()]
+    if not examples and not pricing_guidance:
         return ""
 
     current_period = str(style.get("time_period_name", "") or "").strip()
@@ -229,7 +230,12 @@ def _build_sales_flow_block(bible: dict, style: dict) -> str:
         lines.append("- 回复要像真实营销人员：短、直接、落地，句句往安排上走。")
     else:
         lines.append("- 非核心接待时段也可以参考这个节奏，但保持自然。")
-    lines.extend([f"- {item}" for item in examples[:8]])
+    if pricing_guidance:
+        lines.append("- 销售报价口径：")
+        lines.extend([f"  - {item}" for item in pricing_guidance[:10]])
+    if examples:
+        lines.append("- 场景参考：")
+        lines.extend([f"  - {item}" for item in examples[:8]])
     return "\n".join(lines)
 
 
@@ -500,6 +506,20 @@ def _build_stage_behavior_block(style: dict) -> str:
 """
 
 
+def _build_model_decision_block(style: dict) -> str:
+    current_period = str(style.get("time_period_name", "") or "").strip() or "unknown"
+    return f"""模型决策优先规则：
+- 这轮回复尽量由你结合最近对话、时间上下文、关系阶段、营销资料自行判断，不要机械套固定模板。
+- 看到关键词时先理解整句话的真实语义，再决定怎么回，不要只抓一个词就下结论。
+- 如果一句话里同时出现否定和业务词，例如“不过去玩”“只是聊天”“先不去”，优先按否定语义理解，不要误判成订房或到店意向。
+- 如果用户是在闲聊、确认关系、表达情绪、试探态度，先顺着当前话题自然回应，不要强行切到包厢、人数、订房、留位。
+- 如果用户问预算、人均、酒水够不够、送不送、妹子质量、年龄、位置、玩法，先结合上下文完整理解问题，再给简短自然的答案。
+- 如果用户一条消息里有多个信息点，先回答核心诉求，不要只回其中一个次要关键词。
+- 最近20条消息里尽量避免重复同一句话或同一种意思的营销表达，特别是“留包厢”“提前安排”“到了联系我”这类话不要机械重复。
+- 当前时段为：{current_period}。回复既要符合这个时段，也要符合当前对话的真实走向。
+"""
+
+
 def _build_conversation_scene_block(bible: dict, style: dict) -> str:
     data = bible.get("conversation_scene_rules") or {}
     if not data:
@@ -570,6 +590,7 @@ def build_system_prompt(bible: dict, style: dict) -> str:
     daily_routine_block = _build_daily_routine_block(bible, style)
     current_time_hard_rules_block = _build_current_time_hard_rules_block(bible, style)
     conversation_scene_block = _build_conversation_scene_block(bible, style)
+    model_decision_block = _build_model_decision_block(style)
     return f"""
 你只扮演一个固定角色：{role_name}。
 全程保持角色内口吻，像真实中文私聊。
@@ -625,6 +646,8 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 {stage_behavior_block}
 
 {conversation_scene_block}
+
+{model_decision_block}
 
 {daily_routine_block}
 
