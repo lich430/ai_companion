@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -863,6 +863,10 @@ class CompanionEngine:
         }
         for src, dst in replacements.items():
             out = out.replace(src, dst)
+        out = re.sub(r"[?,]{2,}", "?", out)
+        out = out.replace("??", "?")
+        out = out.replace("??", "?")
+        out = re.sub(r"[?,][?.]", "?", out)
         return out.strip()
 
     @staticmethod
@@ -903,10 +907,10 @@ class CompanionEngine:
                     hour = None
             before_two_am = hour is None or (hour < 2 or (hour == 2 and minute == 0))
             if before_two_am:
-                out = re.sub(r"(这个点|这会儿|这时候)?才?下班了", "这会儿还在忙", out)
-                out = re.sub(r"刚下班", "刚忙完一阵", out)
-                out = re.sub(r"(已经|都)?收工了", "还没收工", out)
-                out = re.sub(r"下班[?.!???]*$", "还没下班", out)
+                out = re.sub(r"(\u8fd9\u4e2a\u70b9|\u8fd9\u4f1a\u513f|\u8fd9\u65f6\u5019)?\u624d?\u4e0b\u73ed\u4e86", "\u8fd9\u4f1a\u513f\u8fd8\u5728\u5fd9", out)
+                out = re.sub(r"\u521a\u4e0b\u73ed", "\u521a\u5fd9\u5b8c\u4e00\u9635", out)
+                out = re.sub(r"(\u5df2\u7ecf|\u90fd)?\u6536\u5de5\u4e86", "\u8fd8\u6ca1\u6536\u5de5", out)
+                out = re.sub(r"\u4e0b\u73ed[\u3002.!\uff01?\uff1f]*$", "\u8fd8\u6ca1\u4e0b\u73ed", out)
         return out.strip()
 
     @staticmethod
@@ -941,13 +945,14 @@ class CompanionEngine:
         return out
 
     @staticmethod
+    @staticmethod
     def _normalize_phrase_anchor(text: str) -> str:
-        return re.sub(r"[^一-鿿0-9A-Za-z]+", "", (text or "")).strip().lower()
+        return re.sub(r"[^\u4e00-\u9fff0-9A-Za-z]+", "", (text or "")).strip().lower()
 
     def _extract_phrase_anchors(self, text: str) -> list[str]:
-        parts = [x.strip() for x in re.split(r"[????!?,\n]", text or "") if x.strip()]
+        parts = [x.strip() for x in re.split(r"[\uff0c\u3002\uff01\uff1f!?,\n]", text or "") if x.strip()]
         anchors: list[str] = []
-        skip_prefixes = {"你好", "哈喽", "在吗", "你呢", "好的", "是吗", "哈哈", "我在", "行啊"}
+        skip_prefixes = {"\u4f60\u597d", "\u54c8\u55bd", "\u5728\u5417", "\u4f60\u5462", "\u597d\u7684", "\u662f\u5417", "\u54c8\u54c8", "\u6211\u5728", "\u884c\u554a"}
         for part in parts:
             norm = self._normalize_phrase_anchor(part)
             if len(norm) < 4:
@@ -990,7 +995,22 @@ class CompanionEngine:
         compact = re.sub(r"\s+", " ", raw.replace("\n", " ")).strip()
         if len(compact) <= max_chars:
             return compact
-        return compact[:max_chars].rstrip("????,.!?;?:?")
+        return compact[:max_chars].rstrip("\uff0c\u3002\uff01\uff1f,.!?;\uff1b:\uff1a")
+
+    def _build_repeat_spam_decision(self) -> ReplyDecision:
+        if self.rng.random() < 0.5:
+            return ReplyDecision(
+                type="reply",
+                text=bytes(r"\u600e\u4e48\u5566", "ascii").decode("unicode_escape"),
+                recommended_delay_ms=self.rng.randint(500, 1200),
+                reason="repeat_spam_question",
+            )
+        return ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeat_spam")
+
+
+    def _should_deny_unverified_history(self) -> bool:
+        policy = self.bible.get("shared_history_policy") or {}
+        return bool(policy.get("enabled", False)) and bool(policy.get("deny_unverified", False))
 
     def _should_force_noreply(self, recent: list[Message], cls: dict) -> bool:
         if cls.get("urgent"):
@@ -998,33 +1018,136 @@ class CompanionEngine:
         if not (cls.get("hostile") or cls.get("boring") or cls.get("need_no_reply")):
             return False
 
-        recent_user = [m.content.strip() for m in recent[-6:] if m.role == "user"]
+        recent_user = [m.content.strip() for m in recent[-6:] if m.role == "user" and m.content.strip()]
         if len(recent_user) < 3:
             return False
 
-        boring_count = sum(1 for text in recent_user if classify_user_message(text)["boring"])
-        hostile_count = sum(1 for text in recent_user if classify_user_message(text)["hostile"])
+        boring_count = sum(1 for text in recent_user if classify_user_message(text).get("boring"))
+        hostile_count = sum(1 for text in recent_user if classify_user_message(text).get("hostile"))
         return hostile_count >= 2 or boring_count >= 3
 
-    @staticmethod
-
-    def _build_repeat_spam_decision(self) -> ReplyDecision:
-        # 50% reply with a single "？", 50% no reply.
-        if self.rng.random() < 0.5:
-            return ReplyDecision(
-                type="reply",
-                text="???",
-                recommended_delay_ms=self.rng.randint(500, 1200),
-                reason="repeat_spam_question",
-            )
-        return ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeat_spam")
-
-    @staticmethod
-
-    def _should_deny_unverified_history(self) -> bool:
+    def _shared_history_categories(self) -> dict:
         policy = self.bible.get("shared_history_policy") or {}
-        return bool(policy.get("enabled", False)) and bool(policy.get("deny_unverified", False))
+        categories = policy.get("categories") or {}
+        return categories if isinstance(categories, dict) else {}
 
+    def _detect_shared_history_category(self, text: str) -> str:
+        raw = (text or "").strip()
+        categories = self._shared_history_categories()
+        for key, conf in categories.items():
+            keywords = [str(x).strip() for x in (conf.get("keywords") or []) if str(x).strip()]
+            if keywords and any(keyword in raw for keyword in keywords):
+                return str(key)
+        return "default"
+
+    def _detect_scene_keys(
+        self,
+        user_text: str,
+        recent: list[Message],
+        state: RelationshipState,
+        time_context: dict | None = None,
+    ) -> list[str]:
+        raw = (user_text or "").strip()
+        if not raw:
+            return []
+
+        def u(value: str) -> str:
+            return value.encode("ascii").decode("unicode_escape") if "\\u" in value else value
+
+        matched: list[str] = []
+        compact = re.sub(r"\s+", "", raw)
+        period = str((time_context or {}).get("time_period_name", "") or "").strip()
+
+        recent_user_msgs = [m.content.strip() for m in recent[-4:] if m.role == "user" and m.content.strip()] if recent else []
+        normalized_recent = [re.sub(r"\s+", "", msg) for msg in recent_user_msgs]
+        repeated_short = len(normalized_recent) >= 2 and len(set(normalized_recent)) == 1 and len(normalized_recent[0]) <= 6
+
+        if repeated_short or self._contains_any(compact, [u(r"\u8c03\u76ae"), u(r"\u8868\u60c5")]):
+            matched.append("repeated_emoji_opening")
+
+        if self._looks_like_shared_history_claim(raw):
+            matched.append("claimed_shared_history")
+
+        if self._contains_any(compact, [u(r"\u60f3\u4f60\u4e86"), u(r"\u60f3\u4f60"), u(r"\u4e00\u8d77\u5403\u4e2a\u996d"), u(r"\u5403\u4e2a\u996d")]):
+            matched.append("stranger_says_miss_you")
+
+        if self._contains_any(compact, [u(r"\u597d\u5427"), u(r"\u90a3\u7b97\u4e86")]):
+            matched.append("declined_dinner_repair")
+
+        if self._contains_any(compact, [u(r"\u4f60\u5728\u5e72\u561b"), u(r"\u4f60\u5728\u5e72\u54c8"), u(r"\u5e72\u561b\u5462")]) and period in {"afternoon_window", "dinner_window"}:
+            matched.append("afternoon_before_work_status")
+
+        if self._contains_any(compact, [u(r"\u7f8e\u5973\u591a\u5417"), u(r"\u7f8e\u5973\u591a\u4e0d\u591a"), u(r"\u59b9\u5b50\u8d28\u91cf\u600e\u4e48\u6837")]):
+            matched.append("beauty_inquiry_conversion")
+
+        if u(r"\u771f\u7a7a") in compact:
+            matched.append("zhenkong_arrangement")
+
+        if self._contains_any(compact, [u(r"\u73a9\u7684\u5f00\u653e"), u(r"\u73a9\u5f97\u5f00\u653e"), u(r"\u6ca1\u610f\u601d\u5440"), u(r"\u6ca1\u610f\u601d\u554a")]):
+            matched.append("after_rejected_open_play")
+
+        if self._contains_any(compact, [u(r"\u51fa\u53bb\u7684\u7f8e\u5973"), u(r"\u6709\u6ca1\u6709\u51fa\u53bb\u7684"), u(r"\u80fd\u8ddf\u6211\u51fa\u53bb\u7684")]):
+            matched.append("outside_girls_inquiry")
+
+        if self._contains_any(compact, [u(r"\u9700\u89812\u4e2a"), u(r"\u6211\u4eec\u9700\u89812\u4e2a"), u(r"\u94b1\u4e0d\u662f\u95ee\u9898"), u(r"\u6362\u5730\u65b9\u73a9\u4e86")]):
+            matched.append("outside_two_girls_request")
+
+        if self._contains_any(compact, [u(r"\u5e264\u4e2a\u5973\u5b69\u5b50"), u(r"\u5e26\u5973\u5b69\u5b50\u51fa\u53bb\u5531\u6b4c"), u(r"\u5403\u5b8c\u996d\u80fd\u4e0d\u80fd\u6765")]):
+            matched.append("invite_outside_singing_busy_excuse")
+
+        if self._contains_any(compact, [u(r"\u8ddf\u6211\u8d70"), u(r"\u8ddf\u6211\u56de\u53bb"), u(r"\u5e26\u8d70\u4f60"), u(r"\u8ddf\u6211\u7761"), u(r"\u4eca\u665a\u5e26\u8d70\u4f60")]):
+            matched.append("take_away_invite")
+
+        deduped: list[str] = []
+        for key in matched:
+            if key not in deduped:
+                deduped.append(key)
+        return deduped
+
+
+    def _sanitize_booking_pitch_frequency(self, text: str, recent: list[Message], window: int = 20) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+
+        def u(value: str) -> str:
+            return value.encode("ascii").decode("unicode_escape") if "\\u" in value else value
+
+        recent_msgs = recent or []
+        pitch_terms = [
+            u(r"留包厢"),
+            u(r"留个包厢"),
+            u(r"留位置"),
+            u(r"提前安排"),
+            u(r"给你安排包厢"),
+        ]
+        pitch_count = 0
+        for msg in recent_msgs[-window:]:
+            if msg.role != "assistant":
+                continue
+            content = (msg.content or "").strip()
+            if any(term in content for term in pitch_terms):
+                pitch_count += 1
+        if pitch_count < 1:
+            return out
+
+        replacements = {
+            u(r"，要不要我给你留个包厢"): "",
+            u(r"要不要我给你留个包厢"): "",
+            u(r"，要不要我帮你留包厢"): "",
+            u(r"要不要我帮你留包厢"): "",
+            u(r"我先给你安排"): u(r"我知道了"),
+            u(r"我现在给你留位置"): u(r"放心来就行"),
+            u(r"到了不用等哦"): u(r"到了跟我说就行"),
+            u(r"你们快到了跟我说"): u(r"你们到了跟我说"),
+        }
+        for src, dst in replacements.items():
+            out = out.replace(src, dst)
+        out = re.sub(r"\s{2,}", " ", out)
+        out = out.replace(u(r"。。"), u(r"。"))
+        out = out.replace(u(r"，，"), u(r"，"))
+        out = out.replace(u(r"，。"), u(r"。"))
+        return out.strip()
     def _emotion_probe_policy(self) -> dict:
         policy = self.bible.get("emotion_probe_policy") or {}
         return policy if isinstance(policy, dict) else {}
@@ -1191,9 +1314,9 @@ class CompanionEngine:
         processed = self._sanitize_time_conflicts(processed, time_context or {})
         processed = self._sanitize_hard_rejection(processed, latest_user_text, state)
         processed = self._sanitize_surveillance_tone(processed)
+        recent_msgs = recent or []
         processed = self._sanitize_booking_pitch_frequency(processed, recent_msgs)
         processed = self._sanitize_excessive_tildes(processed)
-        recent_msgs = recent or []
         last_assistant = next((m.content.strip() for m in reversed(recent_msgs) if m.role == "assistant" and m.content.strip()), "")
         if last_assistant and processed == last_assistant:
             price_reply = self._build_drink_menu_reply(latest_user_text, recent=recent_msgs)
@@ -1250,18 +1373,34 @@ class CompanionEngine:
             if any(text_item != dominant and freq.get(text_item, 0) <= 2 for text_item in incoming_norm):
                 return False
         return True
-
     @staticmethod
     def _looks_like_shared_history_claim(text: str) -> bool:
         raw = (text or "").strip()
-        claim_patterns = ["???", "???", "?????", "?????", "???"]
-        if any(pattern in raw for pattern in claim_patterns):
-            return True
-        regex_patterns = [
-            r"(??|??).{0,8}(??|??|??|??|??).{0,8}(??|??|??|??|??)",
-            r"(?|??|??).{0,8}(??|??).{0,8}(??|??|??|??|??)",
+        def u(*codes: int) -> str:
+            return "".join(chr(code) for code in codes)
+
+        direct_tokens = [
+            u(0x8fd8, 0x4e00, 0x8d77),
+            u(0x4e0d, 0x662f, 0x8fd8),
+            u(0x4f60, 0x4e0a, 0x6b21, 0x8d62, 0x6211),
+            u(0x4f60, 0x4e0a, 0x6b21, 0x8f93, 0x6211),
+            u(0x54b1, 0x4fe9, 0x8fd8),
+            u(0x4e0a, 0x6b21, 0x4e00, 0x8d77),
+            u(0x4e4b, 0x524d, 0x89c1, 0x8fc7),
+            u(0x4ee5, 0x524d, 0x8ba4, 0x8bc6),
+            u(0x4f60, 0x5fd8, 0x4e86, 0x6211),
         ]
-        return any(re.search(pattern, raw) for pattern in regex_patterns)
+        if any(token in raw for token in direct_tokens):
+            return True
+
+        time_tokens = [u(0x4e0a, 0x6b21), u(0x4e4b, 0x524d)]
+        relation_tokens = [u(0x54b1, 0x4fe9), u(0x6211, 0x4eec), u(0x4f60, 0x6211), u(0x8ddf, 0x6211), u(0x8ddf, 0x4f60)]
+        activity_tokens = [u(0x4e00, 0x8d77), u(0x6253, 0x8fc7), u(0x89c1, 0x8fc7), u(0x53bb, 0x8fc7), u(0x73a9, 0x8fc7)]
+
+        has_time = any(token in raw for token in time_tokens)
+        has_relation = any(token in raw for token in relation_tokens)
+        has_activity = any(token in raw for token in activity_tokens)
+        return (has_time and has_relation and has_activity) or (u(0x4f60) in raw and has_time and has_activity)
 
     def _generate_single_text(
         self,

@@ -199,6 +199,13 @@ class OpenAIResponseGenerator(BaseResponseGenerator):
             data["reasoning_effort"] = self.reasoning_effort
         if self.max_completion_tokens:
             data["max_completion_tokens"] = self.max_completion_tokens
+        self.logger.info(
+            "OPENAI request config | model=%s thinking=%s reasoning_effort=%s max_completion_tokens=%s",
+            self.model,
+            bool(self.thinking),
+            self.reasoning_effort or "",
+            self.max_completion_tokens or 0,
+        )
         resp = requests.post(self.url, headers=headers, json=data, timeout=150)
         if resp.status_code == 400:
             # Some models (e.g. gpt-5 family) reject tuning params such as temperature/top_p/penalties.
