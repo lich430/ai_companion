@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import re
@@ -24,6 +25,8 @@ from engine.repetition_guard import RepetitionGuard
 from engine.response_generator import GLMResponseGenerator, OpenAIResponseGenerator
 from engine.style_controller import StyleController
 from models.schemas import Message, RelationshipState, ReplyDecision, ResponseContext, UserProfile
+
+logger = logging.getLogger(__name__)
 
 
 class CompanionEngine:
@@ -596,7 +599,7 @@ class CompanionEngine:
             return "我在夜场上班，平时陪客人喝酒聊天，也会帮忙订房安排包厢"
 
         if self._contains_any(latest, ["不过去玩就不能找你聊天", "不过去玩就不能找你聊天了"]):
-            return "可以"
+            return "当然可以呀。"
 
         if self._contains_any(latest, ["酒水能便宜吗", "酒水可以便宜吗", "能便宜吗", "能优惠吗", "酒水优惠"]):
             return "你过来，我可以给你送酒"
@@ -605,7 +608,7 @@ class CompanionEngine:
             return "可以送"
 
         if self._contains_any(latest, ["酒水别不够", "酒不够", "不够喝", "酒水不够", "别不够啊"]):
-            return "可以适当地送一些酒"
+            return "你这边可以点一些，我再送一些。"
 
         if self._contains_any(latest, ["我们就4个人喝的不多", "喝的不多", "四个人喝的不多"]):
             if self._recent_user_mentions(recent, ["酒水别不够", "不够喝", "酒水不够", "就一箱酒水"]):
@@ -618,7 +621,7 @@ class CompanionEngine:
             return "最新来了很多漂亮的新人"
 
         if self._contains_any(latest, ["妹妹都是多大的", "妹子都是多大的", "多大"]):
-            return "20岁左右"
+            return "基本18到20左右"
 
         if self._contains_any(latest, ["你们那边都有什么", "你那边都有什么", "那边都有什么"]):
             if booking_count >= 1:
@@ -1411,12 +1414,10 @@ class CompanionEngine:
         cls: dict,
         time_context: dict | None = None,
     ) -> str:
-        drink_menu_reply = self._build_drink_menu_reply(user_text, recent=recent)
-        if drink_menu_reply:
-            return drink_menu_reply
-        template_reply = self._build_sales_template_reply(user_text, recent, time_context or {})
-        if template_reply:
-            return template_reply
+        priority_reply, priority_source = self._build_priority_template_reply(user_text, recent, time_context)
+        if priority_reply:
+            logger.info("single reply source=%s | user_text=%r | reply=%r", priority_source, user_text, priority_reply)
+            return priority_reply
         if self.identity_guard.is_identity_probe(user_text):
             return self.identity_guard.get_reply(user_id=user_id, stage=state.stage)
         if self._should_deny_unverified_history() and self._looks_like_shared_history_claim(user_text) and not self._has_supporting_shared_history(user_text, recent):
@@ -1485,12 +1486,10 @@ class CompanionEngine:
         max_replies: int = 3,
     ) -> list[str]:
         latest_text = latest_user_messages[-1]
-        drink_menu_reply = self._build_drink_menu_reply(latest_text, recent=recent)
-        if drink_menu_reply:
-            return [drink_menu_reply]
-        template_reply = self._build_sales_template_reply(latest_text, recent, time_context or {})
-        if template_reply:
-            return [template_reply]
+        priority_reply, priority_source = self._build_priority_template_reply(latest_text, recent, time_context)
+        if priority_reply:
+            logger.info("multi reply source=%s | latest_text=%r | reply=%r", priority_source, latest_text, priority_reply)
+            return [priority_reply]
         if self.identity_guard.is_identity_probe(latest_text):
             return [self.identity_guard.get_reply(user_id=user_id, stage=state.stage)]
         if self._should_deny_unverified_history() and self._looks_like_shared_history_claim(latest_text) and not self._has_supporting_shared_history(latest_text, recent):
@@ -1564,6 +1563,15 @@ class CompanionEngine:
                 return cleaned
         return [self._generate_single_text(user_id, latest_text, state, recent, cls, time_context=time_context)]
 
+    def _build_priority_template_reply(self, latest_text: str, recent: list[Message], time_context: dict | None = None) -> tuple[str | None, str | None]:
+        template_reply = self._build_sales_template_reply(latest_text, recent, time_context or {})
+        if template_reply:
+            return template_reply, "sales_template"
+        drink_menu_reply = self._build_drink_menu_reply(latest_text, recent=recent)
+        if drink_menu_reply:
+            return drink_menu_reply, "drink_menu"
+        return None, None
+
     def _record_assistant_reply(self, user_id: str, reply: str):
         self.rep_guard.add_reply(user_id, reply)
         self._add_message(user_id, "assistant", reply)
@@ -1587,8 +1595,20 @@ class CompanionEngine:
         self._add_message(user_id, "user", incoming_text)
         state, recent = self._update_state_and_memories_from_user(user_id, incoming_text)
 
+        priority_reply, priority_source = self._build_priority_template_reply(incoming_text, recent, time_context)
         if self._is_quiet_hours() and not cls["urgent"]:
             decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")
+        elif priority_reply:
+            logger.info("chat reply source=%s | user_text=%r | reply=%r", priority_source, incoming_text, priority_reply)
+            decision = self._finalize_reply(
+                state,
+                priority_reply,
+                priority_source or "template_reply",
+                urgent=cls["urgent"],
+                time_context=time_context,
+                latest_user_text=incoming_text,
+                recent=recent,
+            )
         elif (not is_greeting) and self._is_repeated_user_spam(recent, incoming_texts=[incoming_text]):
             decision = self._build_repeat_spam_decision()
         elif self._should_acknowledgement_noreply(incoming_text, recent, cls):
@@ -1751,8 +1771,22 @@ class CompanionEngine:
         recent = self._get_recent(uid)
         queued_items = []
 
+        priority_reply, priority_source = self._build_priority_template_reply(cleaned[-1], recent, time_context)
         if self._is_quiet_hours() and not combined["urgent"]:
             decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")]
+        elif priority_reply:
+            logger.info("batch reply source=%s | latest_text=%r | reply=%r", priority_source, cleaned[-1], priority_reply)
+            decisions = [
+                self._finalize_reply(
+                    state,
+                    priority_reply,
+                    priority_source or "template_reply",
+                    urgent=combined["urgent"],
+                    time_context=time_context,
+                    latest_user_text=cleaned[-1],
+                    recent=recent,
+                )
+            ]
         elif (not is_greeting_batch) and self._is_repeated_user_spam(recent, incoming_texts=cleaned):
             decisions = [self._build_repeat_spam_decision()]
         elif len(cleaned) == 1 and self._should_acknowledgement_noreply(cleaned[0], recent, combined):
