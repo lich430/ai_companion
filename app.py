@@ -438,28 +438,50 @@ class CompanionEngine:
         raw = (text or "").strip()
         if not raw:
             return None
-        m = re.search(r"(\d+)\s*个?人", raw)
+
+        def _parse_cn_number(token: str) -> int | None:
+            token = (token or "").strip()
+            if not token:
+                return None
+            digits = {
+                "零": 0,
+                "一": 1,
+                "二": 2,
+                "两": 2,
+                "三": 3,
+                "四": 4,
+                "五": 5,
+                "六": 6,
+                "七": 7,
+                "八": 8,
+                "九": 9,
+            }
+            if token == "十":
+                return 10
+            if "十" in token:
+                left, right = token.split("十", 1)
+                tens = digits.get(left, 1 if left == "" else None)
+                ones = 0 if right == "" else digits.get(right)
+                if tens is None or ones is None:
+                    return None
+                return tens * 10 + ones
+            if token in digits:
+                return digits[token]
+            return None
+
+        m = re.search(r"(\d{1,3})\s*个?人", raw)
         if m:
             try:
                 return int(m.group(1))
             except Exception:
                 return None
-        cn_map = {
-            "一个人": 1,
-            "两个人": 2,
-            "二个人": 2,
-            "三个人": 3,
-            "四个人": 4,
-            "五个人": 5,
-            "六个人": 6,
-            "七个人": 7,
-            "八个人": 8,
-            "九个人": 9,
-            "十个人": 10,
-        }
-        for key, value in cn_map.items():
-            if key in raw:
+
+        cn_matches = re.findall(r"([零一二两三四五六七八九十]{1,3})\s*个?人", raw)
+        for token in sorted(cn_matches, key=len, reverse=True):
+            value = _parse_cn_number(token)
+            if value:
                 return value
+
         return None
 
     @staticmethod
@@ -513,12 +535,68 @@ class CompanionEngine:
         user_recent = [m.content.strip() for m in recent[-window:] if m.role == "user" and m.content.strip()]
         return any(self._contains_any(item, tokens) for item in user_recent)
 
+    def _has_recent_budget_context(self, recent: list[Message], window: int = 6) -> bool:
+        budget_tokens = ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少"]
+        budget_reply_tokens = ["人均", "三千", "四千", "左右", "包厢加小费", "送酒水"]
+        for msg in reversed(recent[-window:]):
+            content = (msg.content or "").strip()
+            if not content:
+                continue
+            if msg.role == "user" and self._contains_any(content, budget_tokens):
+                return True
+            if msg.role == "assistant" and self._contains_any(content, budget_reply_tokens):
+                return True
+        return False
+
+    def _looks_like_budget_followup(self, latest_text: str, recent: list[Message], party_size: int | None) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest or not party_size:
+            return False
+        explicit_party_size = self._extract_party_size(latest)
+        if not explicit_party_size:
+            return False
+        if not self._has_recent_budget_context(recent):
+            return False
+        followup_tokens = ["呢", "那", "的话", "如果", "我们", "这边"]
+        return any(token in latest for token in followup_tokens)
+
+    def _should_ignore_repeated_budget_question(self, latest_text: str, recent: list[Message], window: int = 20) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return False
+        party_size = self._extract_party_size(latest)
+        if not party_size:
+            return False
+        asks_budget = self._contains_any(latest, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少"])
+        if not asks_budget and not self._looks_like_budget_followup(latest, recent, party_size):
+            return False
+        if self._contains_any(latest, ["送酒", "送酒水", "送不送酒", "送不", "酒水送", "可以送酒", "小包", "中包", "大包", "包厢"]):
+            return False
+
+        seen_same_budget_question = False
+        seen_budget_answer = False
+        for msg in recent[-window:]:
+            content = (msg.content or "").strip()
+            if not content:
+                continue
+            if msg.role == "user":
+                msg_party_size = self._extract_party_size(content)
+                if msg_party_size == party_size and self._contains_any(content, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少", "呢"]):
+                    seen_same_budget_question = True
+            elif msg.role == "assistant" and self._contains_any(content, ["人均", "三千", "四千", "左右", "包厢加小费", "送酒水"]):
+                seen_budget_answer = True
+        return seen_same_budget_question and seen_budget_answer
+
     def _build_budget_reply(self, latest_text: str, recent: list[Message]) -> str | None:
         latest = (latest_text or "").strip()
         if not latest:
             return None
         party_size = self._recent_user_party_size(latest, recent)
-        asks_budget = self._contains_any(latest, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少"])
+        if not party_size and self._contains_any(latest, ["单刷", "一个人", "一人"]):
+            party_size = 1
+        asks_budget = self._contains_any(latest, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少", "消费多少"])
+        if not asks_budget and self._looks_like_budget_followup(latest, recent, party_size):
+            asks_budget = True
         asks_gift = self._contains_any(latest, ["送酒", "送酒水", "送不送酒", "送不", "酒水送", "可以送酒"])
         if not (asks_budget or asks_gift):
             return None
@@ -526,10 +604,12 @@ class CompanionEngine:
             return None
 
         lines: list[str] = []
-        if self._contains_any(latest, ["人均多少", "人均"]):
-            lines.append("人均1500到2000左右。")
+        if self._contains_any(latest, ["人均多少", "人均", "平均每人", "每人消费"]):
+            lines.append("平均每人消费1500左右。")
         elif asks_budget:
-            if party_size == 2:
+            if party_size == 1:
+                lines.append("一个人消费大概2500左右。")
+            elif party_size == 2:
                 lines.append("包厢加小费差不多三千左右。")
             elif party_size == 3:
                 lines.append("三个人大概四千多。")
@@ -538,7 +618,7 @@ class CompanionEngine:
                 rounded = int(round(estimate / 500.0) * 500)
                 lines.append(f"{party_size}个人大概{rounded}左右。")
             else:
-                lines.append("包厢加小费，人均差不多1500到2000。")
+                lines.append("平均每人消费1500左右。")
 
         if asks_gift:
             lines.append("送酒水。")
@@ -614,10 +694,10 @@ class CompanionEngine:
             if self._recent_user_mentions(recent, ["酒水别不够", "不够喝", "酒水不够", "就一箱酒水"]):
                 return "没事，酒一定会安排好。"
 
-        if self._contains_any(latest, ["出台什么价格", "出台多少钱", "出台价格"]):
-            return "你过来玩，我可以给你介绍开放一点的女孩子"
+        if self._contains_any(latest, ["出台吗","可以出台吗","能出台吗","出台什么价格", "出台多少钱", "出台价格"]):
+            return "你过来玩，我可以给你介绍开放一点的女孩子，你自己聊"
 
-        if self._contains_any(latest, ["妹子质量怎么样", "妹子质量咋样", "质量怎么样"]):
+        if self._contains_any(latest, ["妹子漂亮吗","妹子质量怎么样", "妹子质量咋样", "质量怎么样"]):
             return "最近来了很多漂亮的新人"
 
         if self._contains_any(latest, ["妹妹都是多大的", "妹子都是多大的", "多大"]):
@@ -990,6 +1070,33 @@ class CompanionEngine:
                     return True
         return False
 
+    def _should_ignore_repeated_exchange(
+        self,
+        latest_text: str,
+        candidate_reply: str,
+        recent: list[Message],
+        window: int = 20,
+    ) -> bool:
+        latest_norm = self._normalize_phrase_anchor(latest_text)
+        reply_norm = self._normalize_phrase_anchor(candidate_reply)
+        if not latest_norm and not reply_norm:
+            return False
+
+        user_norms = [
+            self._normalize_phrase_anchor(msg.content)
+            for msg in recent[-window:]
+            if msg.role == "user" and (msg.content or "").strip()
+        ]
+        assistant_norms = [
+            self._normalize_phrase_anchor(msg.content)
+            for msg in recent[-window:]
+            if msg.role == "assistant" and (msg.content or "").strip()
+        ]
+
+        same_question = bool(latest_norm and latest_norm in user_norms)
+        same_reply = bool(reply_norm and reply_norm in assistant_norms)
+        return same_question or same_reply
+
     @staticmethod
     def _split_short_reply(text: str, max_chars: int = 10) -> str:
         raw = (text or "").strip()
@@ -1136,21 +1243,18 @@ class CompanionEngine:
             return out
 
         replacements = {
-            u(r"，要不要我给你留个包厢"): "",
-            u(r"要不要我给你留个包厢"): "",
-            u(r"，要不要我帮你留包厢"): "",
-            u(r"要不要我帮你留包厢"): "",
             u(r"我先给你安排"): u(r"我知道了"),
-            u(r"我现在给你留位置"): u(r"放心来就行"),
             u(r"到了不用等哦"): u(r"到了跟我说就行"),
             u(r"你们快到了跟我说"): u(r"你们到了跟我说"),
         }
         for src, dst in replacements.items():
             out = out.replace(src, dst)
+        out = re.sub(r"，?[^，。！？!?\n]*(留包|留个包|留包厢|预留包厢|留位置|留位|提前安排|安排包厢)[^，。！？!?\n]*", "", out)
         out = re.sub(r"\s{2,}", " ", out)
         out = out.replace(u(r"。。"), u(r"。"))
         out = out.replace(u(r"，，"), u(r"，"))
         out = out.replace(u(r"，。"), u(r"。"))
+        out = re.sub(r"^[，。！？!?\s]+", "", out)
         return out.strip()
     def _emotion_probe_policy(self) -> dict:
         policy = self.bible.get("emotion_probe_policy") or {}
@@ -1565,8 +1669,16 @@ class CompanionEngine:
         return [self._generate_single_text(user_id, latest_text, state, recent, cls, time_context=time_context)]
 
     def _build_priority_template_reply(self, latest_text: str, recent: list[Message], time_context: dict | None = None) -> tuple[str | None, str | None]:
-        # Let the model handle most conversational and sales decisions via prompt.
-        # Keep only a narrow set of deterministic factual drink lookups here.
+        # Keep only a small, ordered set of deterministic replies ahead of model generation.
+        greeting_reply = self._build_greeting_reply(latest_text, recent)
+        if greeting_reply:
+            return greeting_reply, "greeting"
+        budget_reply = self._build_budget_reply(latest_text, recent)
+        if budget_reply:
+            return budget_reply, "budget"
+        sales_reply = self._build_sales_template_reply(latest_text, recent, time_context or {})
+        if sales_reply:
+            return sales_reply, "sales_template"
         drink_menu_reply = self._build_drink_menu_reply(latest_text, recent=recent)
         if drink_menu_reply:
             return drink_menu_reply, "drink_menu"
@@ -1598,6 +1710,10 @@ class CompanionEngine:
         priority_reply, priority_source = self._build_priority_template_reply(incoming_text, recent, time_context)
         if self._is_quiet_hours() and not cls["urgent"]:
             decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")
+        elif self._should_ignore_repeated_budget_question(incoming_text, prior_recent):
+            decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeated_budget_question")
+        elif priority_reply and self._should_ignore_repeated_exchange(incoming_text, priority_reply, prior_recent):
+            decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeated_exchange")
         elif priority_reply:
             logger.info("chat reply source=%s | user_text=%r | reply=%r", priority_source, incoming_text, priority_reply)
             decision = self._finalize_reply(
@@ -1646,15 +1762,18 @@ class CompanionEngine:
             )
         else:
             text = self._generate_single_text(user_id, incoming_text, state, recent, cls, time_context=time_context)
-            decision = self._finalize_reply(
-                state,
-                text,
-                "reply",
-                urgent=cls["urgent"],
-                time_context=time_context,
-                latest_user_text=incoming_text,
-                recent=recent,
-            )
+            if self._should_ignore_repeated_exchange(incoming_text, text, prior_recent):
+                decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeated_exchange")
+            else:
+                decision = self._finalize_reply(
+                    state,
+                    text,
+                    "reply",
+                    urgent=cls["urgent"],
+                    time_context=time_context,
+                    latest_user_text=incoming_text,
+                    recent=recent,
+                )
 
         if decision.type == "reply" and decision.text:
             self._record_assistant_reply(user_id, decision.text)
@@ -1774,6 +1893,10 @@ class CompanionEngine:
         priority_reply, priority_source = self._build_priority_template_reply(cleaned[-1], recent, time_context)
         if self._is_quiet_hours() and not combined["urgent"]:
             decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")]
+        elif self._should_ignore_repeated_budget_question(cleaned[-1], prior_recent):
+            decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeated_budget_question")]
+        elif priority_reply and self._should_ignore_repeated_exchange(cleaned[-1], priority_reply, prior_recent):
+            decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeated_exchange")]
         elif priority_reply:
             logger.info("batch reply source=%s | latest_text=%r | reply=%r", priority_source, cleaned[-1], priority_reply)
             decisions = [
@@ -1839,18 +1962,22 @@ class CompanionEngine:
                 time_context=time_context,
                 max_replies=(max(2, self.max_batch_replies) if allow_multi else 1),
             )
-            decisions = [
-                self._finalize_reply(
-                    state,
-                    reply,
-                    "reply",
-                    urgent=combined["urgent"],
-                    time_context=time_context,
-                    latest_user_text=cleaned[-1],
-                    recent=recent,
+            decisions = []
+            for reply in raw_replies:
+                if self._should_ignore_repeated_exchange(cleaned[-1], reply, prior_recent):
+                    decisions.append(ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeated_exchange"))
+                    continue
+                decisions.append(
+                    self._finalize_reply(
+                        state,
+                        reply,
+                        "reply",
+                        urgent=combined["urgent"],
+                        time_context=time_context,
+                        latest_user_text=cleaned[-1],
+                        recent=recent,
+                    )
                 )
-                for reply in raw_replies
-            ]
 
         with self._pending_lock:
             for decision in decisions:

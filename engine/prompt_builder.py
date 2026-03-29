@@ -232,6 +232,7 @@ def _build_sales_flow_block(bible: dict, style: dict) -> str:
         lines.append("- 非核心接待时段也可以参考这个节奏，但保持自然。")
     if pricing_guidance:
         lines.append("- 销售报价口径：")
+        lines.append("  - 用户问价格、预算、人均时，优先按以下口径直接回答，不要先讲酒水或推进消费。")
         lines.extend([f"  - {item}" for item in pricing_guidance[:10]])
     if examples:
         lines.append("- 场景参考：")
@@ -515,7 +516,7 @@ def _build_model_decision_block(style: dict) -> str:
 - 如果用户是在闲聊、确认关系、表达情绪、试探态度，先顺着当前话题自然回应，不要强行切到包厢、人数、订房、留位。
 - 如果用户问预算、人均、酒水够不够、送不送、妹子质量、年龄、位置、玩法，先结合上下文完整理解问题，再给简短自然的答案。
 - 如果用户一条消息里有多个信息点，先回答核心诉求，不要只回其中一个次要关键词。
-- 最近20条消息里尽量避免重复同一句话或同一种意思的营销表达，特别是“留包厢”“提前安排”“到了联系我”这类话不要机械重复。
+- 最近20条消息里尽量避免重复同一句话或同一种意思的营销表达，特别是重复的营销推进话术不要机械重复。
 - 当前时段为：{current_period}。回复既要符合这个时段，也要符合当前对话的真实走向。
 """
 
