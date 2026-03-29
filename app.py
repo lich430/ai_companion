@@ -42,6 +42,9 @@ class CompanionEngine:
         glm_api_key: str | None = None,
         openai_api_key: str | None = None,
         openai_base_url: str | None = None,
+        openai_thinking: dict | None = None,
+        openai_reasoning_effort: str | None = None,
+        openai_max_completion_tokens: int | None = None,
         chat_model: str | None = None,
         embed_model: str | None = None,
         role_bible_path: str | None = None,
@@ -88,7 +91,14 @@ class CompanionEngine:
         self.state_machine = RelationshipStateMachine(self.bible)
         self.style_controller = StyleController(self.bible)
         if self.llm_provider == "openai":
-            self.generator = OpenAIResponseGenerator(api_key=llm_api_key, model=chat_model, base_url=openai_base_url)
+            self.generator = OpenAIResponseGenerator(
+                api_key=llm_api_key,
+                model=chat_model,
+                base_url=openai_base_url,
+                thinking=openai_thinking,
+                reasoning_effort=openai_reasoning_effort,
+                max_completion_tokens=openai_max_completion_tokens,
+            )
         else:
             self.generator = GLMResponseGenerator(api_key=llm_api_key, model=chat_model)
         self.summarizer = MemorySummarizer(self.generator, self.bible)
@@ -121,6 +131,92 @@ class CompanionEngine:
         self.reply_policy_stats[decision.type] = self.reply_policy_stats.get(decision.type, 0) + 1
         if decision.reason:
             self.reply_policy_stats[decision.reason] = self.reply_policy_stats.get(decision.reason, 0) + 1
+
+    def _get_recent(self, user_id: str, limit: int | None = None) -> list[Message]:
+        uid = str(user_id or "default").strip() or "default"
+        cached = self.recent_messages.get(uid)
+        if cached:
+            recent = list(cached)
+        else:
+            recent = self.memory.get_recent_chat_messages(uid, limit=max(1, limit or self.glm_context_messages))
+            self.recent_messages[uid] = list(recent)
+        if limit is not None:
+            return recent[-max(1, limit):]
+        return recent[-max(1, self.glm_context_messages):]
+
+    def _add_message(self, user_id: str, role: str, content: str, ts: datetime | None = None):
+        uid = str(user_id or "default").strip() or "default"
+        msg = Message(role=role, content=str(content or "").strip(), ts=ts or datetime.now(UTC))
+        recent = self.recent_messages.setdefault(uid, self.memory.get_recent_chat_messages(uid, limit=max(1, self.glm_context_messages)))
+        recent.append(msg)
+        if len(recent) > max(40, self.glm_context_messages):
+            del recent[:-max(40, self.glm_context_messages)]
+        if msg.content:
+            self.memory.add_chat_message(uid, role, msg.content, ts=msg.ts)
+
+    def _get_turn_count(self, user_id: str) -> int:
+        uid = str(user_id or "default").strip() or "default"
+        if uid in self.turn_counts:
+            return int(self.turn_counts.get(uid, 0) or 0)
+        turn_count = self.memory.get_turn_count(uid)
+        self.turn_counts[uid] = turn_count
+        return turn_count
+
+    def _get_state(self, user_id: str) -> RelationshipState:
+        uid = str(user_id or "default").strip() or "default"
+        existing = self.user_states.get(uid)
+        if existing is not None:
+            return existing
+        state = RelationshipState(user_id=uid)
+        state = self.state_machine.apply_stage_defaults(state)
+        self.user_states[uid] = state
+        return state
+
+    def _update_state_and_memories_from_user(self, user_id: str, text: str) -> tuple[RelationshipState, list[Message]]:
+        uid = str(user_id or "default").strip() or "default"
+        state = self._get_state(uid)
+        recent = self._get_recent(uid)
+        updated = self.state_machine.update_from_message(state, text, recent)
+        self.user_states[uid] = updated
+        return updated, recent
+
+    def _maybe_run_summary(self, user_id: str):
+        uid = str(user_id or "default").strip() or "default"
+        turn_count = self._get_turn_count(uid)
+        if self.summary_every_n_turns <= 0:
+            return
+        if turn_count <= 0 or (turn_count % self.summary_every_n_turns) != 0:
+            return
+        try:
+            recent = self._get_recent(uid)
+            if len(recent) < 4:
+                return
+            state = self._get_state(uid)
+            recalled = self.memory.recall_memories(
+                user_id=uid,
+                query_text=recent[-1].content,
+                limit=6,
+                categories=["user_profile", "relationship_event"],
+            )
+            role_life = self.memory.recall_memories(
+                user_id=uid,
+                query_text=recent[-1].content,
+                limit=3,
+                categories=["role_life"],
+            )
+            ctx = ResponseContext(
+                user_id=uid,
+                latest_user_message=recent[-1].content,
+                recent_messages=recent,
+                profile=UserProfile(user_id=uid),
+                state=state,
+                recalled_memories=recalled,
+                role_life_memories=role_life,
+                time_context=self._build_time_context(uid, recent),
+            )
+            self.summarizer.summarize_and_store(uid, ctx)
+        except Exception:
+            return
 
     @staticmethod
     def _leaks_ai_identity(text: str) -> bool:
@@ -388,69 +484,198 @@ class CompanionEngine:
                 return m.group(1)
         return ""
 
+    @staticmethod
+    def _contains_booking_terms(text: str) -> bool:
+        raw = (text or "").strip()
+        booking_terms = ["留包", "留个包", "留包厢", "留位置", "留位", "提前安排", "安排包厢"]
+        return any(term in raw for term in booking_terms)
+
+    def _booking_pitch_count(self, recent: list[Message], window: int = 20) -> int:
+        assistant_recent = [m.content.strip() for m in recent[-window:] if m.role == "assistant" and m.content.strip()]
+        return sum(1 for item in assistant_recent if self._contains_booking_terms(item))
+
+    def _recent_user_party_size(self, latest_text: str, recent: list[Message]) -> int | None:
+        party_size = self._extract_party_size(latest_text)
+        if party_size:
+            return party_size
+        for msg in reversed(recent[-8:]):
+            if msg.role != "user":
+                continue
+            party_size = self._extract_party_size(msg.content)
+            if party_size:
+                return party_size
+        return None
+
+    def _recent_user_mentions(self, recent: list[Message], tokens: list[str], window: int = 8) -> bool:
+        user_recent = [m.content.strip() for m in recent[-window:] if m.role == "user" and m.content.strip()]
+        return any(self._contains_any(item, tokens) for item in user_recent)
+
+    def _build_budget_reply(self, latest_text: str, recent: list[Message]) -> str | None:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return None
+        party_size = self._recent_user_party_size(latest, recent)
+        asks_budget = self._contains_any(latest, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少"])
+        asks_gift = self._contains_any(latest, ["送酒", "送酒水", "送不送酒", "送不", "酒水送", "可以送酒"])
+        if not (asks_budget or asks_gift):
+            return None
+        if asks_gift and not asks_budget and not party_size:
+            return None
+
+        lines: list[str] = []
+        if self._contains_any(latest, ["人均多少", "人均"]):
+            lines.append("人均1500到2000左右。")
+        elif asks_budget:
+            if party_size == 2:
+                lines.append("包厢加小费差不多三千左右。")
+            elif party_size == 3:
+                lines.append("三个人大概四千多。")
+            elif party_size:
+                estimate = max(2, party_size) * 1600
+                rounded = int(round(estimate / 500.0) * 500)
+                lines.append(f"{party_size}个人大概{rounded}左右。")
+            else:
+                lines.append("包厢加小费，人均差不多1500到2000。")
+
+        if asks_gift:
+            lines.append("送酒水。")
+
+        if not lines:
+            return None
+        return "\n".join(lines[:2])
+
+    def _is_duplicate_image_request(self, latest_text: str, recent: list[Message], window: int = 20) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return False
+        image_tokens = ["图片", "照片", "妹子照片", "有图"]
+        if not self._contains_any(latest, image_tokens):
+            return False
+        recent_user = [m.content.strip() for m in recent[-window:] if m.role == "user" and m.content.strip()]
+        duplicate_count = sum(1 for item in recent_user if self._contains_any(item, image_tokens))
+        recent_assistant = [m.content.strip() for m in recent[-window:] if m.role == "assistant" and m.content.strip()]
+        has_answered = any(self._contains_any(item, ["我手机上没有", "到了你可以挑", "没有图片"]) for item in recent_assistant)
+        return duplicate_count >= 1 and has_answered
+
+    def _build_greeting_reply(self, latest_text: str, recent: list[Message]) -> str | None:
+        raw = (latest_text or "").strip()
+        if not raw:
+            return None
+        compact = re.sub(r"\s+", "", raw)
+        plain = re.sub("[^0-9A-Za-z\u4e00-\u9fff]+", "", compact).lower()
+        if plain in {"你好", "您好", "哈喽", "嗨", "hello", "hi"}:
+            return "你好"
+        if plain.startswith("我是") and len(plain) <= 6:
+            return "你好。"
+        return None
+
     def _build_sales_template_reply(self, latest_text: str, recent: list[Message], time_context: dict) -> str | None:
         latest = (latest_text or "").strip()
         if not latest:
             return None
 
-        period = str(time_context.get("time_period_name", "") or "").strip()
-        if period not in {"night_work_window", "dinner_window"}:
-            return None
+        greeting_reply = self._build_greeting_reply(latest, recent)
+        if greeting_reply:
+            return greeting_reply
+
+        budget_reply = self._build_budget_reply(latest, recent)
+        if budget_reply:
+            return budget_reply
 
         prior_messages = recent[:-1] if recent else []
         last_assistant = next((m.content.strip() for m in reversed(prior_messages) if m.role == "assistant" and m.content.strip()), "")
-        party_size = self._extract_party_size(latest)
+        party_size = self._recent_user_party_size(latest, recent)
         room_type = self._extract_room_type(latest)
         eta = self._extract_eta_phrase(latest)
+        booking_count = self._booking_pitch_count(recent)
+
+        if self._contains_any(latest, ["发个位置", "发位置", "位置发我", "把位置发我"]):
+            return "宁国路拉菲公馆，到了给我发消息"
+
+        if self._contains_any(latest, ["你从事什么工作", "你做什么工作", "做什么工作", "你是做什么的", "你在什么公司", "做什么的"]):
+            return "我在夜场上班，平时陪客人喝酒聊天，也会帮忙订房安排包厢"
+
+        if self._contains_any(latest, ["不过去玩就不能找你聊天", "不过去玩就不能找你聊天了"]):
+            return "可以"
+
+        if self._contains_any(latest, ["酒水能便宜吗", "酒水可以便宜吗", "能便宜吗", "能优惠吗", "酒水优惠"]):
+            return "你过来，我可以给你送酒"
+
+        if self._contains_any(latest, ["送酒不", "送不送酒", "送酒吗", "可以送酒吗"]):
+            return "可以送"
+
+        if self._contains_any(latest, ["酒水别不够", "酒不够", "不够喝", "酒水不够", "别不够啊"]):
+            return "可以适当地送一些酒"
+
+        if self._contains_any(latest, ["我们就4个人喝的不多", "喝的不多", "四个人喝的不多"]):
+            if self._recent_user_mentions(recent, ["酒水别不够", "不够喝", "酒水不够", "就一箱酒水"]):
+                return "没事，酒一定会安排好。"
+
+        if self._contains_any(latest, ["出台什么价格", "出台多少钱", "出台价格"]):
+            return "你过来玩，我可以给你介绍开放一点的女孩子"
+
+        if self._contains_any(latest, ["妹子质量怎么样", "妹子质量咋样", "质量怎么样"]):
+            return "最新来了很多漂亮的新人"
+
+        if self._contains_any(latest, ["妹妹都是多大的", "妹子都是多大的", "多大"]):
+            return "20岁左右"
+
+        if self._contains_any(latest, ["你们那边都有什么", "你那边都有什么", "那边都有什么"]):
+            if booking_count >= 1:
+                return "有美女陪你唱歌喝酒"
+            return "有美女陪你唱歌喝酒\n是打算今晚过来玩吗"
+
+        if self._contains_any(latest, ["有没有图片"]):
+            return "我手机上没有，公司人很多到了你可以挑嘛"
+
+        if self._contains_any(latest, ["美女多吗", "美女多不多"]):
+            if self._contains_any(latest, ["朋友", "去玩", "过去玩", "晚上"]):
+                if booking_count >= 1:
+                    return "很多呀"
+                return "很多呀，要不要我给你留个包厢。"
+
+        if self._contains_any(latest, ["真空"]) and self._contains_any(latest, ["和上次一样", "上次一样"]):
+            return "可以呀，那我在公司等你。"
+
+        if self._contains_any(latest, ["出去的美女", "有没有出去的", "能跟我出去的"]):
+            return "有，你们自己沟通，我也可以协助你沟通"
+
+        if self._contains_any(latest, ["我们需要2个", "需要2个", "钱不是问题", "换地方玩了"]):
+            return "没问题，来了和我们经理说"
+
+        if self._contains_any(latest, ["玩的开放", "玩得开放", "没意思呀"]):
+            return "那是自然的，肯定让你玩的高兴"
+
+        if self._contains_any(latest, ["今天晚上过去玩", "晚上过去玩", "过去玩", "过去喝酒", "来喝酒", "过来喝酒"]):
+            return "好，你们几个人"
+
+        if self._contains_any(latest, ["今天能不能送点酒", "能不能送点酒", "送点酒"]):
+            return "可以，到时候你点一些，我送一点"
+
+        if self._contains_any(latest, ["带点能玩的进来", "带点能玩的", "能玩的进来", "能玩不给小费", "不给小费"]):
+            return "放心，不能玩不给小费"
 
         if self._contains_any(latest, ["在不在公司", "在公司吗", "在店里吗", "在店吗", "在不在店"]):
             return "在公司呢"
 
-        if self._contains_any(latest, ["你从事什么工作", "你做什么工作", "做什么工作", "你是做什么的", "你在什么公司", "做什么的"]):
-            return "我在夜场上班 平时陪客人喝酒聊天 也会帮忙订房安排包厢"
-
-        if self._contains_any(latest, ["今天晚上过去玩", "晚上过去玩", "过去玩", "过去喝酒", "来喝酒", "过来喝酒"]):
-            return "好 你们几个人"
-
-        if self._contains_any(latest, ["今天能不能送点酒", "能不能送点酒", "送点酒", "送酒"]):
-            return "可以 到时候你点一些 我送一点"
-
-        if self._contains_any(latest, ["带点能玩的进来", "带点能玩的", "能玩的进来", "能玩不给小费", "不给小费"]):
-            return "放心 不能玩不给小费"
-
-        if self._contains_any(latest, ["美女多吗", "美女多不多"]) and self._contains_any(latest, ["朋友", "去玩", "过去玩", "晚上"]):
-            return "很多呀 要不要我给你留个包厢"
-
-        if self._contains_any(latest, ["真空"]) and self._contains_any(latest, ["和上次一样", "上次一样"]):
-            return "可以呀 那我在公司等你"
-
-        if self._contains_any(latest, ["出去的美女", "有没有出去的", "能跟我出去的"]):
-            return "有 你们自己沟通 我也可以协助你沟通"
-
-        if self._contains_any(latest, ["我们需要2个", "需要2个", "钱不是问题", "换地方玩了"]):
-            return "没问题 来了和我们经理说"
-
-        if self._contains_any(latest, ["玩的开放", "玩得开放", "没意思呀"]) and self._contains_any(latest, ["?", "？", "男的"]):
-            return "那是自然的 肯定让你玩的高兴"
-
-        if room_type and (party_size or self._contains_any(latest, ["给我留", "留个", "留一间", "开个"])):
-            room_label = room_type if room_type != "包厢" else "包厢"
-            if party_size:
-                return f"嗯嗯 {room_label}给你们留着 你们几点到"
-            return f"嗯嗯 {room_label}可以给你留 你们几点到"
-
         if eta or self._contains_any(latest, ["快结束了", "一会到", "差不多到了", "四十分钟", "半小时", "一个小时"]):
-            return "好的 快到了给我发信息 我去门口接你们"
+            return "好的，快到了给我发信息，我去门口接你们"
 
         if party_size and self._contains_any(last_assistant, ["几个人"]):
-            return f"{party_size}个人的话给你们安排 你想留小包还是中包"
+            if booking_count >= 1:
+                return f"{party_size}个人的话可以安排。"
+            return f"{party_size}个人的话给你们安排，你想留小包还是中包"
 
         if room_type and self._contains_any(last_assistant, ["几点到", "到店时间"]):
             room_label = room_type if room_type != "包厢" else "包厢"
-            return f"好 {room_label}先给你留着 你们快到了跟我说"
+            if booking_count >= 1:
+                return f"好，{room_label}这边我记着，你们快到了跟我说。"
+            return f"好，{room_label}先给你留着，你们快到了跟我说"
 
         if self._contains_any(latest, ["订房", "开包厢", "留个包", "留位", "安排一下"]):
-            return "可以 你们几个人 我先给你安排"
+            if booking_count >= 1:
+                return "可以，你们几个人"
+            return "可以，你们几个人，我先给你安排"
 
         return None
 
@@ -532,34 +757,32 @@ class CompanionEngine:
             return None
 
         history = recent or []
-        prior_messages = history[:-1] if history and history[-1].role == "user" and history[-1].content.strip() == raw else history
-        last_assistant = next((m.content.strip() for m in reversed(prior_messages) if m.role == "assistant" and m.content.strip()), "")
-        last_user = next((m.content.strip() for m in reversed(prior_messages) if m.role == "user" and m.content.strip()), "")
-        context_query = last_user if ("详细介绍" in last_assistant or "细说" in last_assistant or "发下酒单" in last_assistant) else raw
+        if self._contains_any(raw, ["能便宜吗", "能优惠吗", "送酒", "送不送酒", "酒水别不够", "不够喝", "人均", "需要多少钱", "出台什么价格"]):
+            return None
 
-        query_for_parse = context_query if ("详细介绍" in last_assistant or "细说" in last_assistant or "发下酒单" in last_assistant) else raw
-        matched_category, matched_item = self._find_drink_item(context_query)
-        matched_candidates = self._find_drink_candidates(context_query)
-        asked_specific = bool(re.search(r"(有(?!什么).{1,12}吗|有没有.{1,12}|能点.{1,12}吗|能不能点.{1,12})", query_for_parse))
-        asked_menu = (
-            any(token in query_for_parse for token in ["有什么酒", "都有什么酒", "酒单", "酒水单", "酒水", "有什么喝的", "能喝什么"])
-            or bool(re.search(r"有什么(洋酒|红酒|啤酒|饮料)", query_for_parse))
-            or bool(re.search(r"有(洋酒|红酒|啤酒|饮料)吗", query_for_parse))
-        )
-        asked_detail = (
-            any(token in raw for token in ["详细", "细说", "具体", "介绍一下", "都说下", "全部", "价格", "酒单发我", "发来看看"])
-            or (self._is_acknowledgement_message(raw) and ("详细介绍" in last_assistant or "细说" in last_assistant or "发下酒单" in last_assistant))
-            or raw in {"需要", "你说", "发我看看", "说说看"}
-        )
-        inferred_category = self._infer_drink_category(context_query)
-        if any(token in raw for token in ["多少钱一箱", "一箱多少钱", "一箱多钱", "啤酒多少一箱", "纯生多少一箱", "雪花多少一箱"]):
+        if any(token in raw for token in ["一箱多少钱", "多少钱一箱", "啤酒多少一箱", "纯生多少一箱", "雪花多少一箱", "酒水多少一箱"]):
             marketing = self.bible.get("marketing") or {}
             store_info = marketing.get("store_info") or {}
             drink_info = store_info.get("drink_info") or {}
             beer_box = str(drink_info.get("beer", "") or "").strip()
             if beer_box:
-                return f"啤酒一箱{beer_box}"
-            return "啤酒一箱一千多"
+                return f"啤酒{beer_box}"
+            return "啤酒一箱1000元+/箱（24瓶）"
+
+        matched_category, matched_item = self._find_drink_item(raw)
+        matched_candidates = self._find_drink_candidates(raw)
+        asked_specific = bool(re.search(r"(有|点|喝|上|来).{0,12}?(酒|啤酒|洋酒|红酒|饮料)|有.{0,12}吗", raw))
+        asked_menu = (
+            any(token in raw for token in ["有什么酒", "都有什么酒", "酒单", "酒水", "啤酒", "洋酒", "红酒", "饮料"])
+            or bool(re.search(r"有什么(啤酒|洋酒|红酒|饮料)", raw))
+            or bool(re.search(r"(啤酒|洋酒|红酒|饮料)有哪些", raw))
+        )
+        inferred_category = self._infer_drink_category(raw)
+
+        if asked_menu:
+            if inferred_category and inferred_category in catalog:
+                return f"有 {inferred_category}这边都能点"
+            return "有的 洋酒红酒啤酒这些都有"
 
         if asked_specific and len(matched_candidates) >= 2:
             price_text = "、".join(self._format_short_price(item) for _, item in matched_candidates[:2])
@@ -571,28 +794,11 @@ class CompanionEngine:
         if asked_specific and not matched_item:
             return "没有"
 
-        if asked_menu and asked_detail:
-            target_categories = [inferred_category] if inferred_category and inferred_category in catalog else [x for x in ["洋酒", "红酒", "啤酒"] if x in catalog]
-            if inferred_category == "饮料":
-                target_categories = ["饮料"]
-            lines = []
-            for category in target_categories:
-                listing = self._list_catalog_by_category(category)
-                if listing:
-                    lines.append(f"{category}有{listing}")
-            if "饮料" in catalog and (inferred_category == "饮料" or "饮料" in raw):
-                listing = self._list_catalog_by_category("饮料")
-                if listing:
-                    lines.append(f"饮料有{listing}")
-            return "\n".join(lines[:3]) if lines else None
-
         if matched_item:
             return f"有 {self._format_short_price(matched_item)}"
 
-        if asked_menu:
-            if inferred_category and inferred_category in catalog:
-                return f"有 {inferred_category}这边都能点"
-            return "有的 洋酒红酒啤酒这些都有"
+        if history and self._recent_user_mentions(history, ["有没有图片", "有妹子照片", "妹子照片", "图片"], window=20):
+            return None
 
         return None
 
@@ -610,6 +816,182 @@ class CompanionEngine:
         out = re.sub(r"\n\s*$", "", out).strip()
         return out
 
+    @staticmethod
+    def _sanitize_hard_rejection(text: str, latest_user_text: str, state: RelationshipState | None = None) -> str:
+        out = (text or "").strip()
+        latest = (latest_user_text or "").strip()
+        if not out or not latest:
+            return out
+
+        is_stranger = bool(state and getattr(state, "stage", "") == "stranger")
+        invite_tokens = ["跟我走", "跟我回去", "带走你", "跟我睡", "睡觉", "出去喝酒", "带你出去"]
+        if not (is_stranger and any(token in latest for token in invite_tokens)):
+            return out
+
+        replacements = {
+            "只陪喝酒唱歌，别想歪了": "我们才刚认识呀，先别这么急嘛。",
+            "只陪喝酒唱歌": "我们才刚认识呀，先慢慢来嘛。",
+            "别想歪了": "你也太着急了呀。",
+            "别想了": "先别这么急嘛。",
+            "不行": "现在还不太合适呀。",
+            "没有": "这个先不急呀。",
+            "来不了": "今天可能不太方便呀。",
+            "再说吧": "以后再慢慢看呀。",
+            "以后再说": "以后再慢慢看呀。",
+            "先玩开心": "你先玩开心一点呀。",
+        }
+        for src, dst in replacements.items():
+            if src in out:
+                out = out.replace(src, dst)
+
+        if len(out) <= 6:
+            return "现在还不太合适呀，先慢慢来嘛。"
+        return out
+
+    @staticmethod
+    def _sanitize_surveillance_tone(text: str) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+        replacements = {
+            "盯着你": "陪着你",
+            "我盯着你": "我陪着你",
+            "看着你": "陪着你",
+            "我看着你": "我陪着你",
+            "别急~": "慢慢来~",
+            "别急": "慢慢来",
+        }
+        for src, dst in replacements.items():
+            out = out.replace(src, dst)
+        return out.strip()
+
+    @staticmethod
+    def _sanitize_excessive_tildes(text: str) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+        out = re.sub(r"[~?]{2,}", "~", out)
+        parts = [part.strip() for part in re.split(r"\n+", out) if part.strip()]
+        cleaned = []
+        for part in parts:
+            if part.endswith(("~", "?")):
+                body = part.rstrip("~?").strip()
+                if len(body) > 6:
+                    part = body
+                else:
+                    part = f"{body}~" if body else body
+            cleaned.append(part)
+        return "\n".join(cleaned).strip()
+
+    @staticmethod
+    def _sanitize_time_conflicts(text: str, time_context: dict) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+
+        period = str(time_context.get("time_period_name", "") or "").strip()
+        current_time = str(time_context.get("current_local_time", "") or "").strip()
+        if period == "night_work_window":
+            hour = None
+            minute = 0
+            if current_time:
+                try:
+                    hhmm = current_time.split(" ", 1)[1]
+                    hour = int(hhmm.split(":", 1)[0])
+                    minute = int(hhmm.split(":", 1)[1])
+                except Exception:
+                    hour = None
+            before_two_am = hour is None or (hour < 2 or (hour == 2 and minute == 0))
+            if before_two_am:
+                out = re.sub(r"(这个点|这会儿|这时候)?才?下班了", "这会儿还在忙", out)
+                out = re.sub(r"刚下班", "刚忙完一阵", out)
+                out = re.sub(r"(已经|都)?收工了", "还没收工", out)
+                out = re.sub(r"下班[?.!???]*$", "还没下班", out)
+        return out.strip()
+
+    @staticmethod
+    def _sanitize_conversion_blockers(text: str, latest_user_text: str, time_context: dict) -> str:
+        out = (text or "").strip()
+        if not out:
+            return out
+
+        latest = (latest_user_text or "").strip()
+        period = str(time_context.get("time_period_name", "") or "").strip()
+        high_intent = any(token in latest for token in ["过去", "来喝酒", "喝喝酒", "留个小包", "小包", "订房", "开包厢", "你陪我", "安排", "一个人"])
+        active_period = period in {"night_work_window", "dinner_window"}
+        if not (high_intent and active_period):
+            return out
+
+        replacements = {
+            "但我还在忙，不一定": "可以啊，你过来我给你留个小包",
+            "我还在忙，不一定": "你过来就行，我给你留个小包",
+            "我还在忙": "这会儿在店里，你过来就行",
+            "不一定": "可以安排",
+            "有空陪你聊": "你到了我陪你喝两杯",
+            "有空再说": "你来我给你安排",
+            "改天吧": "今晚过来就行",
+            "现在不方便": "现在可以安排，你过来提前和我说一声",
+        }
+        for src, dst in replacements.items():
+            out = out.replace(src, dst)
+
+        out = re.sub(r"(但|不过)?我还在忙[,?]?所以?", "", out).strip(" ?,")
+        out = re.sub(r"(到时候|回头|再说|看情况)", "我给你安排", out)
+        out = re.sub(r"\s{2,}", " ", out).strip()
+        return out
+
+    @staticmethod
+    def _normalize_phrase_anchor(text: str) -> str:
+        return re.sub(r"[^一-鿿0-9A-Za-z]+", "", (text or "")).strip().lower()
+
+    def _extract_phrase_anchors(self, text: str) -> list[str]:
+        parts = [x.strip() for x in re.split(r"[????!?,\n]", text or "") if x.strip()]
+        anchors: list[str] = []
+        skip_prefixes = {"你好", "哈喽", "在吗", "你呢", "好的", "是吗", "哈哈", "我在", "行啊"}
+        for part in parts:
+            norm = self._normalize_phrase_anchor(part)
+            if len(norm) < 4:
+                continue
+            anchor = norm[:6]
+            if anchor[:2] in skip_prefixes or anchor in skip_prefixes:
+                continue
+            anchors.append(anchor)
+        return anchors
+
+    def _has_recent_phrase_repetition(self, candidate: str, recent: list[Message], window: int = 20) -> bool:
+        candidate_anchors = self._extract_phrase_anchors(candidate)
+        if not candidate_anchors:
+            return False
+
+        assistant_recent = [m.content for m in recent[-window:] if m.role == "assistant" and m.content.strip()]
+        if not assistant_recent:
+            return False
+
+        history_anchors = set()
+        history_texts = [self._normalize_phrase_anchor(text) for text in assistant_recent]
+        for text in assistant_recent:
+            for anchor in self._extract_phrase_anchors(text):
+                history_anchors.add(anchor)
+
+        for anchor in candidate_anchors:
+            if anchor in history_anchors:
+                return True
+            for hist in history_texts:
+                if len(anchor) >= 4 and anchor in hist:
+                    return True
+        return False
+
+    @staticmethod
+    def _split_short_reply(text: str, max_chars: int = 10) -> str:
+        raw = (text or "").strip()
+        if not raw:
+            return raw
+        max_chars = max(1, int(max_chars))
+        compact = re.sub(r"\s+", " ", raw.replace("\n", " ")).strip()
+        if len(compact) <= max_chars:
+            return compact
+        return compact[:max_chars].rstrip("????,.!?;?:?")
+
     def _should_force_noreply(self, recent: list[Message], cls: dict) -> bool:
         if cls.get("urgent"):
             return False
@@ -625,51 +1007,6 @@ class CompanionEngine:
         return hostile_count >= 2 or boring_count >= 3
 
     @staticmethod
-    def _is_repeated_user_spam(recent: list[Message], incoming_texts: list[str] | None = None) -> bool:
-        window = [m.content.strip() for m in recent[-10:] if m.role == "user" and m.content.strip()]
-        if incoming_texts:
-            for t in incoming_texts:
-                s = (t or "").strip()
-                if s:
-                    window.append(s)
-        if len(window) < 3:
-            return False
-
-        # consecutive duplicate burst, e.g. "1 1 1" or "想你 想你 想你"
-        run = 1
-        dominant = None
-        for i in range(1, len(window)):
-            if window[i] == window[i - 1]:
-                run += 1
-                if run >= 3:
-                    dominant = window[i]
-                    break
-            else:
-                run = 1
-
-        # high-frequency repeats in a short window
-        freq: dict[str, int] = {}
-        for text in window:
-            freq[text] = freq.get(text, 0) + 1
-        if dominant is None:
-            for text, count in freq.items():
-                if count >= 4:
-                    dominant = text
-                    break
-                if len(text) <= 3 and count >= 3:
-                    dominant = text
-                    break
-
-        if dominant is None:
-            return False
-
-        # Exemption: if current incoming contains a new non-repeated content
-        # different from dominant spam text, do not block.
-        if incoming_texts:
-            incoming_norm = [str(x).strip() for x in incoming_texts if str(x).strip()]
-            if any(text != dominant and freq.get(text, 0) <= 2 for text in incoming_norm):
-                return False
-        return True
 
     def _build_repeat_spam_decision(self) -> ReplyDecision:
         # 50% reply with a single "？", 50% no reply.
@@ -683,37 +1020,6 @@ class CompanionEngine:
         return ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeat_spam")
 
     @staticmethod
-    def _looks_like_shared_history_claim(text: str) -> bool:
-        raw = (text or "").strip()
-        claim_patterns = [
-            "还一起",
-            "不是还",
-            "你上次赢我",
-            "你上次输我",
-            "咱俩还",
-        ]
-        if any(pattern in raw for pattern in claim_patterns):
-            return True
-        regex_patterns = [
-            r"(上次|之前).{0,8}(咱俩|我们|你我|跟我|跟你).{0,8}(一起|打过|见过|去过|玩过)",
-            r"(你|咱俩|我们).{0,8}(上次|之前).{0,8}(一起|打过|见过|去过|玩过)",
-        ]
-        return any(re.search(pattern, raw) for pattern in regex_patterns)
-
-    def _shared_history_categories(self) -> dict:
-        policy = (self.bible.get("shared_history_policy") or {})
-        return policy.get("categories") or {}
-
-    def _detect_shared_history_category(self, text: str) -> str:
-        raw = (text or "").strip()
-        categories = self._shared_history_categories()
-        for category, conf in categories.items():
-            if category == "default":
-                continue
-            keywords = conf.get("keywords") or []
-            if any(keyword in raw for keyword in keywords):
-                return category
-        return "default"
 
     def _should_deny_unverified_history(self) -> bool:
         policy = self.bible.get("shared_history_policy") or {}
@@ -806,95 +1112,6 @@ class CompanionEngine:
         templates = conf.get("deny_templates") or ["你应该是记错了吧 这事没有过"]
         return str(templates[0]).strip()
 
-    def _get_state(self, user_id: str) -> RelationshipState:
-        if user_id not in self.user_states:
-            state = self.memory.get_user_state(user_id)
-            if state is None:
-                state = RelationshipState(user_id=user_id)
-                state = self.state_machine.apply_stage_defaults(state)
-                self.memory.save_user_state(state)
-            self.user_states[user_id] = self.state_machine.apply_stage_defaults(state)
-        return self.user_states[user_id]
-
-    def _add_message(self, user_id: str, role: str, content: str):
-        msg = Message(role=role, content=content)
-        self.memory.add_chat_message(user_id=user_id, role=role, content=content, ts=msg.ts)
-        self.recent_messages.setdefault(user_id, []).append(msg)
-        self.recent_messages[user_id] = self.recent_messages[user_id][-self.glm_context_messages :]
-
-    def _get_recent(self, user_id: str) -> list[Message]:
-        if user_id not in self.recent_messages:
-            self.recent_messages[user_id] = self.memory.get_recent_chat_messages(
-                user_id=user_id,
-                limit=self.glm_context_messages,
-            )
-        return self.recent_messages.setdefault(user_id, [])
-
-    def _get_turn_count(self, user_id: str) -> int:
-        if user_id not in self.turn_counts:
-            self.turn_counts[user_id] = self.memory.get_turn_count(user_id)
-        return self.turn_counts[user_id]
-
-    def _maybe_run_summary(self, user_id: str):
-        if not self.summary_every_n_turns:
-            return
-        if self.turn_counts.get(user_id, 0) % self.summary_every_n_turns != 0:
-            return
-        state = self._get_state(user_id)
-        recent = self._get_recent(user_id)
-        items = self.summarizer.summarize(user_id, recent, state)
-        for item in items:
-            self.memory.add_memory(item)
-
-    def _update_state_and_memories_from_user(self, user_id: str, user_text: str) -> tuple[RelationshipState, list[Message]]:
-        state = self._get_state(user_id)
-        recent = self._get_recent(user_id)
-        state = self.state_machine.update_from_message(state, user_text, recent)
-        state.last_updated = datetime.now(UTC)
-        self.user_states[user_id] = state
-        self.memory.save_user_state(state)
-        self.memory.extract_and_store_user_memory(user_id, user_text)
-        return state, recent
-
-    def _detect_scene_keys(self, user_text: str, recent: list[Message], state: RelationshipState, time_context: dict | None = None) -> list[str]:
-        raw = (user_text or '').strip()
-        if not raw:
-            return []
-        period = str((time_context or {}).get('time_period_name', '') or '').strip()
-        hits: list[str] = []
-        if self._contains_any(raw, ['调皮', '😜', '😝', '😏']) and len(re.findall(r'(调皮|😜|😝|😏)', raw)) >= 1:
-            hits.append('repeated_emoji_opening')
-        if self._contains_any(raw, ['上次一起喝酒', '你这么快就忘记了', '你忘了我吗', '之前见过']):
-            hits.append('claimed_shared_history')
-        if self._contains_any(raw, ['想你了', '一起吃个饭']) and state.stage == 'stranger':
-            hits.append('stranger_says_miss_you')
-        if self._contains_any(raw, ['好吧', '那算了']):
-            hits.append('declined_dinner_repair')
-        if period == 'afternoon_window' and self._contains_any(raw, ['你在干嘛', '你在干嘛呢']):
-            hits.append('afternoon_before_work_status')
-        if self._contains_any(raw, ['美女多吗', '美女多不多']):
-            hits.append('beauty_inquiry_conversion')
-        if self._contains_any(raw, ['真空']):
-            hits.append('zhenkong_arrangement')
-        if self._contains_any(raw, ['玩的开放', '玩得开放', '没意思呀']):
-            hits.append('after_rejected_open_play')
-        if self._contains_any(raw, ['出去的美女', '有没有出去的', '能跟我出去的']):
-            hits.append('outside_girls_inquiry')
-        if self._contains_any(raw, ['需要2个', '钱不是问题', '换地方玩了']):
-            hits.append('outside_two_girls_request')
-        if self._contains_any(raw, ['你带4个女孩子过来', '一起去唱歌']):
-            hits.append('invite_outside_singing_busy_excuse')
-        if self._contains_any(raw, ['跟我走', '跟我回去', '带走你', '跟我睡']):
-            hits.append('take_away_invite')
-        # keep order, dedupe
-        seen = set()
-        ordered = []
-        for key in hits:
-            if key not in seen:
-                seen.add(key)
-                ordered.append(key)
-        return ordered
-
     def _build_style(self, user_id: str, state: RelationshipState, user_text: str, cls: dict, time_context: dict | None = None) -> dict:
         style = self.style_controller.build_style_directives(state)
         style["emoji_enabled"] = self.emoji_enabled
@@ -974,6 +1191,7 @@ class CompanionEngine:
         processed = self._sanitize_time_conflicts(processed, time_context or {})
         processed = self._sanitize_hard_rejection(processed, latest_user_text, state)
         processed = self._sanitize_surveillance_tone(processed)
+        processed = self._sanitize_booking_pitch_frequency(processed, recent_msgs)
         processed = self._sanitize_excessive_tildes(processed)
         recent_msgs = recent or []
         last_assistant = next((m.content.strip() for m in reversed(recent_msgs) if m.role == "assistant" and m.content.strip()), "")
@@ -991,221 +1209,59 @@ class CompanionEngine:
         )
 
     @staticmethod
-    def _sanitize_hard_rejection(text: str, latest_user_text: str, state: RelationshipState | None = None) -> str:
-        out = (text or '').strip()
-        latest = (latest_user_text or '').strip()
-        if not out or not latest:
-            return out
-
-        is_stranger = bool(state and getattr(state, 'stage', '') == 'stranger')
-        invite_tokens = ['跟我走', '跟我回去', '带走你', '跟我睡', '睡觉', '出去喝酒', '带你出去']
-        if not (is_stranger and any(token in latest for token in invite_tokens)):
-            return out
-
-        replacements = {
-            '只陪喝酒唱歌，别想歪了': '我们才刚认识呀，先别这么急嘛。',
-            '只陪喝酒唱歌': '我们才刚认识呀，先慢慢来嘛。',
-            '别想歪了': '你也太着急了呀。',
-            '别想了': '先别这么急嘛。',
-            '不行': '现在还不太合适呀。',
-            '没有': '这个先不急呀。',
-            '来不了': '今天可能不太方便呀。',
-            '再说吧': '以后再慢慢看呀。',
-            '以后再说': '以后再慢慢看呀。',
-            '先玩开心': '你先玩开心一点呀。',
-        }
-        for src, dst in replacements.items():
-            if src in out:
-                out = out.replace(src, dst)
-
-        if len(out) <= 6:
-            return '现在还不太合适呀，先慢慢来嘛。'
-        return out
-
-    @staticmethod
-    def _sanitize_surveillance_tone(text: str) -> str:
-        out = (text or "").strip()
-        if not out:
-            return out
-        replacements = {
-            "盯着你": "陪着你",
-            "我盯着你": "我陪着你",
-            "看着你": "陪着你",
-            "我看着你": "我陪着你",
-            "别急~": "慢慢来~",
-            "别急": "慢慢来",
-        }
-        for src, dst in replacements.items():
-            out = out.replace(src, dst)
-        out = out.strip()
-        return out
-
-    @staticmethod
-    def _sanitize_excessive_tildes(text: str) -> str:
-        out = (text or "").strip()
-        if not out:
-            return out
-        out = re.sub(r"[~～]{2,}", "~", out)
-        parts = [part.strip() for part in re.split(r"\n+", out) if part.strip()]
-        cleaned = []
-        for part in parts:
-            if part.endswith(("~", "～")):
-                body = part.rstrip("~～").strip()
-                if len(body) > 6:
-                    part = body
-                else:
-                    part = f"{body}~" if body else body
-            cleaned.append(part)
-        return "\n".join(cleaned).strip()
-
-    @staticmethod
-    def _sanitize_time_conflicts(text: str, time_context: dict) -> str:
-        out = (text or "").strip()
-        if not out:
-            return out
-
-        period = str(time_context.get("time_period_name", "") or "").strip()
-        current_time = str(time_context.get("current_local_time", "") or "").strip()
-
-        # During the night work window, avoid saying the role has already clocked off.
-        if period == "night_work_window":
-            hour = None
-            minute = 0
-            if current_time:
-                try:
-                    hhmm = current_time.split(" ", 1)[1]
-                    hour = int(hhmm.split(":", 1)[0])
-                    minute = int(hhmm.split(":", 1)[1])
-                except Exception:
-                    hour = None
-            before_two_am = hour is None or (hour < 2 or (hour == 2 and minute == 0))
-            if before_two_am:
-                out = re.sub(r"(这个点|这会儿|这时候)?才?下班了", "这会儿还在忙", out)
-                out = re.sub(r"刚下班", "刚忙完一阵", out)
-                out = re.sub(r"(已经|都)?收工了", "还没收工", out)
-                out = re.sub(r"下班[。.!！?？]*$", "还没下班", out)
-        return out.strip()
-
-    @staticmethod
-    def _sanitize_conversion_blockers(text: str, latest_user_text: str, time_context: dict) -> str:
-        out = (text or "").strip()
-        if not out:
-            return out
-
-        latest = (latest_user_text or "").strip()
-        period = str(time_context.get("time_period_name", "") or "").strip()
-        high_intent = any(
-            token in latest
-            for token in ["过去", "来喝酒", "喝喝酒", "留个小包", "小包", "订房", "开包厢", "你陪我", "安排", "一个人"]
-        )
-        active_period = period in {"night_work_window", "dinner_window"}
-        if not (high_intent and active_period):
-            return out
-
-        replacements = {
-            "但我还在忙，不一定": "可以啊，你过来我给你留个小包",
-            "我还在忙，不一定": "你过来就行，我给你留个小包",
-            "我还在忙": "这会儿在店里，你过来就行",
-            "不一定": "可以安排",
-            "有空陪你聊": "你到了我陪你喝两杯",
-            "有空再说": "你来我给你安排",
-            "改天吧": "今晚过来就行",
-            "现在不方便": "现在可以安排，你过来提前和我说一声",
-        }
-        for src, dst in replacements.items():
-            out = out.replace(src, dst)
-
-        out = re.sub(r"(但|不过)?我还在忙[,，]?所以?", "", out).strip(" ，,")
-        out = re.sub(r"(到时候|回头|再说|看情况)", "我给你安排", out)
-        out = re.sub(r"\s{2,}", " ", out).strip()
-        return out
-
-    @staticmethod
-    def _sanitize_forbidden_invite(text: str) -> str:
-        out = (text or "").strip()
-        if not out:
-            return out
-
-        replacements = {
-            "来店里": "来找我",
-            "到店": "来找我",
-            "来消费": "来聊聊",
-            "来玩": "来聊聊",
-            "来坐坐": "来聊聊",
-            "过来店里": "来找我",
-            "来我店里": "来找我",
-        }
-        for src, dst in replacements.items():
-            out = out.replace(src, dst)
-
-        # Strip remaining explicit store-pull wording if still present.
-        out = re.sub(r"(快)?来找我让我哄哄你(吧|嘛|呀|啊)?", "我在这陪你", out)
-        out = re.sub(r"(快)?来.*?(店里|到店|消费|玩).*", "我在这陪你", out)
-        out = re.sub(r"\s{2,}", " ", out).strip()
-        return out
-
-    @staticmethod
-    def _normalize_phrase_anchor(text: str) -> str:
-        return re.sub(r"[^\u4e00-\u9fff0-9A-Za-z]+", "", (text or "")).strip().lower()
-
-    def _extract_phrase_anchors(self, text: str) -> list[str]:
-        parts = [x.strip() for x in re.split(r"[，。！？!?,\n]", text or "") if x.strip()]
-        anchors: list[str] = []
-        skip_prefixes = {
-            "你好",
-            "哈喽",
-            "在吗",
-            "你呢",
-            "好的",
-            "是吗",
-            "哈哈",
-            "我在",
-            "行啊",
-        }
-        for part in parts:
-            norm = self._normalize_phrase_anchor(part)
-            if len(norm) < 4:
-                continue
-            anchor = norm[:6]
-            if anchor[:2] in skip_prefixes or anchor in skip_prefixes:
-                continue
-            anchors.append(anchor)
-        return anchors
-
-    def _has_recent_phrase_repetition(self, candidate: str, recent: list[Message], window: int = 20) -> bool:
-        candidate_anchors = self._extract_phrase_anchors(candidate)
-        if not candidate_anchors:
+    def _is_repeated_user_spam(recent: list[Message], incoming_texts: list[str] | None = None) -> bool:
+        window = [m.content.strip() for m in recent[-10:] if m.role == "user" and m.content.strip()]
+        if incoming_texts:
+            for t in incoming_texts:
+                s = (t or "").strip()
+                if s:
+                    window.append(s)
+        if len(window) < 3:
             return False
 
-        assistant_recent = [m.content for m in recent[-window:] if m.role == "assistant" and m.content.strip()]
-        if not assistant_recent:
+        run = 1
+        dominant = None
+        for i in range(1, len(window)):
+            if window[i] == window[i - 1]:
+                run += 1
+                if run >= 3:
+                    dominant = window[i]
+                    break
+            else:
+                run = 1
+
+        freq: dict[str, int] = {}
+        for text_item in window:
+            freq[text_item] = freq.get(text_item, 0) + 1
+        if dominant is None:
+            for text_item, count in freq.items():
+                if count >= 4:
+                    dominant = text_item
+                    break
+                if len(text_item) <= 3 and count >= 3:
+                    dominant = text_item
+                    break
+
+        if dominant is None:
             return False
 
-        history_anchors = set()
-        history_texts = [self._normalize_phrase_anchor(text) for text in assistant_recent]
-        for text in assistant_recent:
-            for anchor in self._extract_phrase_anchors(text):
-                history_anchors.add(anchor)
-
-        for anchor in candidate_anchors:
-            if anchor in history_anchors:
-                return True
-            for hist in history_texts:
-                if len(anchor) >= 4 and anchor in hist:
-                    return True
-        return False
+        if incoming_texts:
+            incoming_norm = [str(x).strip() for x in incoming_texts if str(x).strip()]
+            if any(text_item != dominant and freq.get(text_item, 0) <= 2 for text_item in incoming_norm):
+                return False
+        return True
 
     @staticmethod
-    def _split_short_reply(text: str, max_chars: int = 10) -> str:
+    def _looks_like_shared_history_claim(text: str) -> bool:
         raw = (text or "").strip()
-        if not raw:
-            return raw
-        max_chars = max(1, int(max_chars))
-        # Keep a single short line by default to avoid over-splitting into many messages.
-        compact = re.sub(r"\s+", " ", raw.replace("\n", " ")).strip()
-        if len(compact) <= max_chars:
-            return compact
-        return compact[:max_chars].rstrip("，。！？,.!?;；:：")
+        claim_patterns = ["???", "???", "?????", "?????", "???"]
+        if any(pattern in raw for pattern in claim_patterns):
+            return True
+        regex_patterns = [
+            r"(??|??).{0,8}(??|??|??|??|??).{0,8}(??|??|??|??|??)",
+            r"(?|??|??).{0,8}(??|??).{0,8}(??|??|??|??|??)",
+        ]
+        return any(re.search(pattern, raw) for pattern in regex_patterns)
 
     def _generate_single_text(
         self,
@@ -1398,10 +1454,12 @@ class CompanionEngine:
             decision = self._build_repeat_spam_decision()
         elif self._should_acknowledgement_noreply(incoming_text, recent, cls):
             decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="acknowledgement_no_reply")
+        elif self._is_duplicate_image_request(incoming_text, recent):
+            decision = ReplyDecision(type="noreply", recommended_delay_ms=0, reason="duplicate_image_request")
         elif (not is_greeting) and cls["low_context"] and not had_context_before:
             decision = ReplyDecision(
                 type="reply",
-                text="??????",
+                text="你想说什么呀",
                 recommended_delay_ms=self.rng.randint(500, 1200),
                 reason="low_context_no_history",
             )
@@ -1560,11 +1618,13 @@ class CompanionEngine:
             decisions = [self._build_repeat_spam_decision()]
         elif len(cleaned) == 1 and self._should_acknowledgement_noreply(cleaned[0], recent, combined):
             decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="acknowledgement_no_reply")]
+        elif len(cleaned) == 1 and self._is_duplicate_image_request(cleaned[0], recent):
+            decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="duplicate_image_request")]
         elif (not is_greeting_batch) and combined["low_context"] and not had_context_before:
             decisions = [
                 ReplyDecision(
                     type="reply",
-                text="??????",
+                text="你想说什么呀",
                     recommended_delay_ms=self.rng.randint(500, 1200),
                     reason="low_context_no_history",
                 )
@@ -1596,7 +1656,7 @@ class CompanionEngine:
                 )
             ]
         else:
-            allow_multi = combined["urgent"] or (self.rng.random() < self.multi_reply_probability)
+            allow_multi = bool(combined["urgent"])
             raw_replies = self._generate_multi_replies(
                 uid,
                 cleaned,

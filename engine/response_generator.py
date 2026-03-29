@@ -159,10 +159,21 @@ class GLMResponseGenerator(BaseResponseGenerator):
 
 
 class OpenAIResponseGenerator(BaseResponseGenerator):
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini", base_url: str | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-4o-mini",
+        base_url: str | None = None,
+        thinking: dict | None = None,
+        reasoning_effort: str | None = None,
+        max_completion_tokens: int | None = None,
+    ):
         super().__init__(api_key=api_key, model=model)
         root = str(base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).strip()
         self.url = root.rstrip("/") + "/chat/completions"
+        self.thinking = thinking if isinstance(thinking, dict) else None
+        self.reasoning_effort = str(reasoning_effort or "").strip() or None
+        self.max_completion_tokens = min(int(max_completion_tokens), 131072) if max_completion_tokens else None
 
     def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.85) -> str:
         self._log_request("openai", system_prompt, user_prompt)
@@ -182,6 +193,12 @@ class OpenAIResponseGenerator(BaseResponseGenerator):
             "frequency_penalty": 0.5,
             "presence_penalty": 0.35,
         }
+        if self.thinking:
+            data["thinking"] = self.thinking
+        if self.reasoning_effort:
+            data["reasoning_effort"] = self.reasoning_effort
+        if self.max_completion_tokens:
+            data["max_completion_tokens"] = self.max_completion_tokens
         resp = requests.post(self.url, headers=headers, json=data, timeout=150)
         if resp.status_code == 400:
             # Some models (e.g. gpt-5 family) reject tuning params such as temperature/top_p/penalties.
@@ -189,6 +206,12 @@ class OpenAIResponseGenerator(BaseResponseGenerator):
                 "model": self.model,
                 "messages": data["messages"],
             }
+            if self.thinking:
+                retry_payload["thinking"] = self.thinking
+            if self.reasoning_effort:
+                retry_payload["reasoning_effort"] = self.reasoning_effort
+            if self.max_completion_tokens:
+                retry_payload["max_completion_tokens"] = self.max_completion_tokens
             retry = requests.post(self.url, headers=headers, json=retry_payload, timeout=150)
             if retry.ok:
                 body = retry.json()

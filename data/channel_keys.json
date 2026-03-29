@@ -2,17 +2,31 @@
   "keys": {
     "Tyu8G7": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "fde74dcf1f1446597106d0dd360a434.GV6tL7MrYohq2vKl",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Tyu8G7.db"
+      "memory_db_path": "memory_Tyu8G7.db",
+      "llm_provider": "openai",
+      "openai_api_key": "77d2af34-3df1-4ceb-8a77-de2e14c04ca9",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Hny4K8": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "a8a74eb5e1f743579653310c73baa255.ACXboMXfiBpXUhEE",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Hny4K8.db"
+      "memory_db_path": "memory_Hny4K8.db",
+      "llm_provider": "openai",
+      "openai_api_key": "62065131-2425-41df-8288-9830e253b3fe",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Mkt9P2": {
       "role_bible_path": "data/honey_bible.json",
@@ -21,63 +35,124 @@
       "llm_provider": "openai",
       "openai_api_key": "b5876f47-2a36-45b1-826e-e12b4e6b54a9",
       "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
-      "openai_chat_model": "doubao-seed-2-0-pro-260215"
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Rly7Q1": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "cc1833b15b064138abe35da22bd7f5df.LRln8ObcmKjYYTMX",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Rly7Q1.db"
+      "memory_db_path": "memory_Rly7Q1.db",
+      "llm_provider": "openai",
+      "openai_api_key": "6a71ec7f-3139-48f1-9479-66d681d92c6a",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Bar6N3": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "4c980865409341ec83cdb912b93c0157.P9fSRHXKjaxsAz45",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Bar6N3.db"
+      "memory_db_path": "memory_Bar6N3.db",
+      "llm_provider": "openai",
+      "openai_api_key": "d14a402f-db9e-4f6c-897e-8cf810140cd3",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Lxr5D2": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "a0eeddb7c0104f9fa2836840b58632a0.D0OBSOIWXaEsrI90",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Lxr5D2.db"
+      "memory_db_path": "memory_Lxr5D2.db",
+      "llm_provider": "openai",
+      "openai_api_key": "a3bb75b8-6729-49b1-8483-0a69a48fbe84",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Pmn8Q4": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "6545de09309b45c687bc653a4092a0f7.HxVmahT3nVoi7Mat",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Pmn8Q4.db"
+      "memory_db_path": "memory_Pmn8Q4.db",
+      "llm_provider": "openai",
+      "openai_api_key": "7cd36e13-bab8-49bd-8a21-6f3680dc34a1",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Vrt3K6": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "2db8ba4a97d942df9e1088aaa92e2adf.UTRrBjktI0brSpWw",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Vrt3K6.db"
+      "memory_db_path": "memory_Vrt3K6.db",
+      "llm_provider": "openai",
+      "openai_api_key": "f93aa4e9-22a0-4e1b-ba5e-6126a8d5922d",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Sya7M1": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "8623d3ae8a774fd799207b1f427f01e1.mPqdZIUdQoWkBNfk",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Sya7M1.db"
+      "memory_db_path": "memory_Sya7M1.db",
+      "llm_provider": "openai",
+      "openai_api_key": "4b35bef3-ff29-4026-a9c1-3dbf01582b08",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Qvo2T8": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "c793d963ad42401f9cfc7c25df2c6454.WQCr2FStbtJglCoq",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Qvo2T8.db"
+      "memory_db_path": "memory_Qvo2T8.db",
+      "llm_provider": "openai",
+      "openai_api_key": "7ea55ca3-be9b-4e21-8fb9-91f7d4a00fa8",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Nke6R4": {
       "role_bible_path": "data/honey_bible.json",
-      "glm_api_key": "22dffb96a9914580828bd492803f0398.RKce6y1ikPqDn8wJ",
-      "glm_chat_model": "glm-5",
       "glm_embed_model": "embedding-3",
-      "memory_db_path": "memory_Nke6R4.db"
+      "memory_db_path": "memory_Nke6R4.db",
+      "llm_provider": "openai",
+      "openai_api_key": "f451e3dd-2802-4f98-89e0-28ac345a1d5a",
+      "openai_base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "openai_chat_model": "doubao-seed-2-0-pro-260215",
+      "openai_thinking": {
+        "type": "enabled"
+      },
+      "openai_reasoning_effort": "high",
+      "openai_max_completion_tokens": 131072
     },
     "Bxf9H3": {
       "role_bible_path": "data/honey_bible.json",
