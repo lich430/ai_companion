@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -50,13 +51,21 @@ def _should_filter_group_message(username: str, user_id: Optional[str]) -> bool:
     return any((kw in uid) or (kw in name) for kw in BLOCK_GROUP_KEYWORDS)
 
 
-def _is_duplicate_incoming(username: str, user_id: Optional[str], message: str) -> bool:
+def _incoming_message_hash(username: str, user_id: Optional[str], message: str) -> str:
+    uid = str(user_id or username or "").strip()
+    msg = str(message or "").strip()
+    raw = f"{uid}\n{msg}".encode("utf-8", errors="ignore")
+    return hashlib.sha1(raw).hexdigest()[:12]
+
+
+def _check_duplicate_incoming(username: str, user_id: Optional[str], message: str) -> tuple[bool, float | None, str]:
+    msg_hash = _incoming_message_hash(username, user_id, message)
     if INCOMING_DEDUP_WINDOW_SEC <= 0:
-        return False
+        return False, None, msg_hash
     uid = str(user_id or username or "").strip()
     msg = str(message or "").strip()
     if not uid or not msg:
-        return False
+        return False, None, msg_hash
     key = (uid, msg)
     now = time.time()
     cutoff = now - INCOMING_DEDUP_WINDOW_SEC
@@ -67,7 +76,9 @@ def _is_duplicate_incoming(username: str, user_id: Optional[str], message: str) 
                 _incoming_dedup_seen.pop(k, None)
         last = _incoming_dedup_seen.get(key)
         _incoming_dedup_seen[key] = now
-    return last is not None and (now - last) <= INCOMING_DEDUP_WINDOW_SEC
+    delta = (now - last) if last is not None else None
+    is_dup = last is not None and delta is not None and delta <= INCOMING_DEDUP_WINDOW_SEC
+    return is_dup, delta, msg_hash
 
 
 def _load_key_config() -> dict[str, dict]:
@@ -482,8 +493,9 @@ def get_users():
 @app.post("/hook/incoming", response_model=HookIncomingResponse)
 def hook_incoming(req: HookIncomingRequest, key: Optional[str] = None):
     resolved_key = _resolve_hook_key(req.key or key)
+    msg_hash = _incoming_message_hash(req.username, req.user_id, req.message)
     logger.info(
-        f"/hook/incoming request: key={resolved_key!r}, username={req.username!r}, user_id={req.user_id!r}, message={req.message!r}"
+        f"/hook/incoming request: key={resolved_key!r}, username={req.username!r}, user_id={req.user_id!r}, msg_hash={msg_hash!r}, message={req.message!r}"
     )
     if not resolved_key or _get_key_conf(resolved_key) is None:
         return HookIncomingResponse(
@@ -504,11 +516,15 @@ def hook_incoming(req: HookIncomingRequest, key: Optional[str] = None):
             key=resolved_key,
             queue_size=incoming_queue.qsize(),
         )
-    if _is_duplicate_incoming(req.username, req.user_id, req.message):
+    is_dup, dup_delta, dup_hash = _check_duplicate_incoming(req.username, req.user_id, req.message)
+    if is_dup:
         logger.info(
-            "/hook/incoming duplicate dropped: username=%r, user_id=%r, message=%r",
+            "/hook/incoming duplicate dropped: username=%r, user_id=%r, msg_hash=%r, delta_sec=%.3f, window_sec=%.1f, message=%r",
             req.username,
             req.user_id,
+            dup_hash,
+            dup_delta or 0.0,
+            INCOMING_DEDUP_WINDOW_SEC,
             req.message,
         )
         return HookIncomingResponse(

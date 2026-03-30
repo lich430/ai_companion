@@ -469,23 +469,22 @@ class CompanionEngine:
                 return digits[token]
             return None
 
-        m = re.search(r"(\d{1,3})\s*个?人", raw)
+        m = re.search(r"(\d{1,3})\s*(?:个人|人|个)", raw)
         if m:
             try:
                 return int(m.group(1))
             except Exception:
                 return None
 
-        cn_matches = re.findall(r"([零一二两三四五六七八九十]{1,3})\s*个?人", raw)
+        cn_matches = re.findall(r"([零一二两三四五六七八九十]{1,3})\s*(?:个人|人|个)", raw)
         for token in sorted(cn_matches, key=len, reverse=True):
             value = _parse_cn_number(token)
-            if value:
+            if value is not None:
                 return value
 
         return None
 
-    @staticmethod
-    def _extract_room_type(text: str) -> str:
+    def _extract_room_type(self, text: str) -> str:
         raw = (text or "").strip()
         for room in ["小包", "中包", "大包", "包厢"]:
             if room in raw:
@@ -535,8 +534,22 @@ class CompanionEngine:
         user_recent = [m.content.strip() for m in recent[-window:] if m.role == "user" and m.content.strip()]
         return any(self._contains_any(item, tokens) for item in user_recent)
 
+    def _is_bare_how_much_query(self, latest_text: str) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return False
+        compact = re.sub(r"\s+", "", latest).strip("/？?！!。.")
+        return compact in {"多少", "多钱"}
+
+    def _asks_budget_explicitly(self, latest_text: str) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest or self._is_bare_how_much_query(latest):
+            return False
+        explicit_budget_tokens = ["多少钱", "人均", "预算", "需要多少钱", "大概多少", "消费多少", "平均每人", "每人消费"]
+        return self._contains_any(latest, explicit_budget_tokens)
+
     def _has_recent_budget_context(self, recent: list[Message], window: int = 6) -> bool:
-        budget_tokens = ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少"]
+        budget_tokens = ["多少钱", "人均", "预算", "需要多少钱", "大概多少", "消费多少", "平均每人", "每人消费"]
         budget_reply_tokens = ["人均", "三千", "四千", "左右", "包厢加小费", "送酒水"]
         for msg in reversed(recent[-window:]):
             content = (msg.content or "").strip()
@@ -558,7 +571,12 @@ class CompanionEngine:
         if not self._has_recent_budget_context(recent):
             return False
         followup_tokens = ["呢", "那", "的话", "如果", "我们", "这边"]
-        return any(token in latest for token in followup_tokens)
+        if any(token in latest for token in followup_tokens):
+            return True
+        compact = re.sub(r"\s+", "", latest)
+        if re.fullmatch(r"(?:\d{1,3}|[零一二两三四五六七八九十]{1,3})(?:个人|人|个)[？?]?", compact):
+            return True
+        return False
 
     def _should_ignore_repeated_budget_question(self, latest_text: str, recent: list[Message], window: int = 20) -> bool:
         latest = (latest_text or "").strip()
@@ -567,7 +585,7 @@ class CompanionEngine:
         party_size = self._extract_party_size(latest)
         if not party_size:
             return False
-        asks_budget = self._contains_any(latest, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少"])
+        asks_budget = self._asks_budget_explicitly(latest)
         if not asks_budget and not self._looks_like_budget_followup(latest, recent, party_size):
             return False
         if self._contains_any(latest, ["送酒", "送酒水", "送不送酒", "送不", "酒水送", "可以送酒", "小包", "中包", "大包", "包厢"]):
@@ -581,7 +599,7 @@ class CompanionEngine:
                 continue
             if msg.role == "user":
                 msg_party_size = self._extract_party_size(content)
-                if msg_party_size == party_size and self._contains_any(content, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少", "呢"]):
+                if msg_party_size == party_size and (self._asks_budget_explicitly(content) or "呢" in content):
                     seen_same_budget_question = True
             elif msg.role == "assistant" and self._contains_any(content, ["人均", "三千", "四千", "左右", "包厢加小费", "送酒水"]):
                 seen_budget_answer = True
@@ -591,10 +609,14 @@ class CompanionEngine:
         latest = (latest_text or "").strip()
         if not latest:
             return None
+        if self._is_contact_request(latest):
+            return None
+        if self._contains_any(latest, ["出台", "出台价格", "出台多少钱", "能出台吗", "可以出台吗", "出去的美女", "带走", "跟我走"]):
+            return None
         party_size = self._recent_user_party_size(latest, recent)
         if not party_size and self._contains_any(latest, ["单刷", "一个人", "一人"]):
             party_size = 1
-        asks_budget = self._contains_any(latest, ["多少钱", "多少", "人均", "预算", "需要多少钱", "大概多少", "消费多少"])
+        asks_budget = self._asks_budget_explicitly(latest)
         if not asks_budget and self._looks_like_budget_followup(latest, recent, party_size):
             asks_budget = True
         asks_gift = self._contains_any(latest, ["送酒", "送酒水", "送不送酒", "送不", "酒水送", "可以送酒"])
@@ -607,16 +629,10 @@ class CompanionEngine:
         if self._contains_any(latest, ["人均多少", "人均", "平均每人", "每人消费"]):
             lines.append("平均每人消费1500左右。")
         elif asks_budget:
-            if party_size == 1:
-                lines.append("一个人消费大概2500左右。")
-            elif party_size == 2:
-                lines.append("包厢加小费差不多三千左右。")
-            elif party_size == 3:
-                lines.append("三个人大概四千多。")
-            elif party_size:
-                estimate = max(2, party_size) * 1600
-                rounded = int(round(estimate / 500.0) * 500)
-                lines.append(f"{party_size}个人大概{rounded}左右。")
+            if party_size:
+                estimate_reply = self._format_budget_estimate_reply(party_size)
+                if estimate_reply:
+                    lines.append(estimate_reply)
             else:
                 lines.append("平均每人消费1500左右。")
 
@@ -626,6 +642,72 @@ class CompanionEngine:
         if not lines:
             return None
         return "\n".join(lines[:2])
+
+    def _format_budget_estimate_reply(self, party_size: int) -> str | None:
+        if party_size <= 0:
+            return None
+        if party_size == 1:
+            return "一个人消费大概2500左右。"
+        if party_size == 2:
+            return "包厢加小费差不多三千左右。"
+        if party_size == 3:
+            return "三个人大概四千多。"
+        total = party_size * 1500
+        rounded = int(round(total / 500.0) * 500)
+        if rounded >= 10000:
+            approx = f"{rounded / 10000:.1f}".rstrip("0").rstrip(".")
+            return f"{party_size}个人大概{approx}万左右。"
+        if rounded % 1000 == 0:
+            return f"{party_size}个人大概{rounded // 1000}千左右。"
+        return f"{party_size}个人大概{rounded}左右。"
+
+    def _looks_like_budget_answer(self, text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        budget_markers = ["消费", "人均", "左右", "小费", "包厢", "千", "万", "块"]
+        if any(marker in raw for marker in budget_markers):
+            return True
+        return bool(re.search(r"\d+", raw))
+
+    def _is_contact_request(self, latest_text: str) -> bool:
+        latest = (latest_text or "").strip().lower()
+        if not latest:
+            return False
+        contact_tokens = [
+            "qq", "q号", "q多少", "qq多少", "微信", "vx", "vx", "手机号", "手机号码", "电话", "联系方式", "联系你", "怎么联系你",
+        ]
+        return self._contains_any(latest, contact_tokens)
+
+    def _is_location_request(self, latest_text: str) -> bool:
+        latest = (latest_text or "").strip().lower()
+        if not latest:
+            return False
+        direct_tokens = [
+            "发个位置", "发位置", "位置发我", "把位置发我", "发下位置", "发一下位置",
+            "发个位", "给个位", "给个位置", "给我位置", "给我个位", "发个位子", "给个位子",
+            "发个定位", "发定位", "定位发我", "发下定位", "发一下定位", "给我定位", "甩个定位", "定位甩我",
+            "发个地址", "发地址", "地址发我", "发下地址", "发一下地址", "给个地址", "给我地址",
+            "你们店在哪", "你店在哪", "店在哪", "场子在哪", "你们场子在哪", "你那店在哪", "你那边在哪",
+            "你在哪", "你在哪儿", "你在哪呢", "你在什么位置", "什么位置", "哪个位置", "具体位置",
+            "怎么走", "咋走", "怎么过去", "咋过去", "导航到哪", "导航搜什么", "发个导航",
+        ]
+        if self._contains_any(latest, direct_tokens):
+            return True
+        regexes = [
+            r"发.{0,3}(位置|位子|定位|地址)",
+            r"给.{0,3}(位置|位子|定位|地址)",
+            r"(店|场子).{0,3}在哪",
+            r"(你|你们).{0,4}在哪",
+            r"怎么.{0,2}(走|过去)",
+            r"导航.{0,4}(哪|什么)",
+        ]
+        return any(re.search(pattern, latest) for pattern in regexes)
+
+    def _build_contact_reply(self, latest_text: str) -> str | None:
+        if not self._is_contact_request(latest_text):
+            return None
+        return "先在这聊嘛。"
 
     def _is_duplicate_image_request(self, latest_text: str, recent: list[Message], window: int = 20) -> bool:
         latest = (latest_text or "").strip()
@@ -672,7 +754,11 @@ class CompanionEngine:
         eta = self._extract_eta_phrase(latest)
         booking_count = self._booking_pitch_count(recent)
 
-        if self._contains_any(latest, ["发个位置", "发位置", "位置发我", "把位置发我"]):
+        contact_reply = self._build_contact_reply(latest)
+        if contact_reply:
+            return contact_reply
+
+        if self._is_location_request(latest):
             return "宁国路拉菲公馆，到了给我发消息"
 
         if self._contains_any(latest, ["你从事什么工作", "你做什么工作", "做什么工作", "你是做什么的", "你在什么公司", "做什么的"]):
@@ -694,31 +780,34 @@ class CompanionEngine:
             if self._recent_user_mentions(recent, ["酒水别不够", "不够喝", "酒水不够", "就一箱酒水"]):
                 return "没事，酒一定会安排好。"
 
-        if self._contains_any(latest, ["出台吗","可以出台吗","能出台吗","出台什么价格", "出台多少钱", "出台价格"]):
+        if self._contains_any(latest, ["出台","可以出台吗","能出台吗","出台什么价格", "出台多少钱", "出台价格"]):
             return "你过来玩，我可以给你介绍开放一点的女孩子，你自己聊"
 
-        if self._contains_any(latest, ["妹子漂亮吗","妹子质量怎么样", "妹子质量咋样", "质量怎么样"]):
+        if self._contains_any(latest, ["妹子放的开吗","妹子玩的咋样", "妹子玩得咋样", "妹子会玩吗", "妹子玩的怎么样"]):
+            return "都挺会玩的，保证你们玩得尽兴"
+
+        if self._contains_any(latest, ["妹子咋样","妹子好看吗","妹子漂亮吗","妹子质量怎么样", "妹子质量咋样", "质量怎么样"]):
             return "最近来了很多漂亮的新人"
 
         if self._contains_any(latest, ["妹妹都是多大的", "妹子都是多大的", "多大"]):
             return "基本18到20左右"
 
-        if self._contains_any(latest, ["你们那边都有什么", "你那边都有什么", "那边都有什么"]):
+        if self._contains_any(latest, ["你们那边都有什么", "你那边都有什么", "那边都有什么", "你们这边都有什么", "你这边都有什么", "这边都有什么"]):
             if booking_count >= 1:
                 return "有美女陪你唱歌喝酒"
             return "有美女陪你唱歌喝酒\n是打算今晚过来玩吗"
 
-        if self._contains_any(latest, ["有没有图片"]):
+        if self._contains_any(latest, ["有没有图片", "有妹子照片吗", "有照片吗", "妹子照片", "照片吗"]):
             return "我手机上没有，公司人很多到了你可以挑嘛"
 
         if self._contains_any(latest, ["美女多吗", "美女多不多"]):
             if self._contains_any(latest, ["朋友", "去玩", "过去玩", "晚上"]):
                 if booking_count >= 1:
                     return "很多呀"
-                return "很多呀，要不要我给你留个包厢。"
+                return "很多呀"
 
         if self._contains_any(latest, ["真空"]) and self._contains_any(latest, ["和上次一样", "上次一样"]):
-            return "可以呀，那我在公司等你。"
+            return "可以的"
 
         if self._contains_any(latest, ["出去的美女", "有没有出去的", "能跟我出去的"]):
             return "有，你们自己沟通，我也可以协助你沟通"
@@ -840,7 +929,7 @@ class CompanionEngine:
             return None
 
         history = recent or []
-        if self._contains_any(raw, ["能便宜吗", "能优惠吗", "送酒", "送不送酒", "酒水别不够", "不够喝", "人均", "需要多少钱", "出台什么价格"]):
+        if self._contains_any(raw, ["能便宜吗", "能优惠吗", "送酒", "送不送酒", "酒水别不够", "不够喝", "人均", "需要多少钱", "出台什么价格", "图片", "照片", "妹子照片", "有图"]):
             return None
 
         if any(token in raw for token in ["一箱多少钱", "多少钱一箱", "啤酒多少一箱", "纯生多少一箱", "雪花多少一箱", "酒水多少一箱"]):
@@ -881,7 +970,7 @@ class CompanionEngine:
         if matched_item:
             return f"有 {self._format_short_price(matched_item)}"
 
-        if history and self._recent_user_mentions(history, ["有没有图片", "有妹子照片", "妹子照片", "图片"], window=20):
+        if history and self._recent_user_mentions(history, ["有没有图片","有妹子照片吗", "有妹子照片", "妹子照片", "图片"], window=20):
             return None
 
         return None
@@ -995,6 +1084,33 @@ class CompanionEngine:
                 out = re.sub(r"\u521a\u4e0b\u73ed", "\u521a\u5fd9\u5b8c\u4e00\u9635", out)
                 out = re.sub(r"(\u5df2\u7ecf|\u90fd)?\u6536\u5de5\u4e86", "\u8fd8\u6ca1\u6536\u5de5", out)
                 out = re.sub(r"\u4e0b\u73ed[\u3002.!\uff01?\uff1f]*$", "\u8fd8\u6ca1\u4e0b\u73ed", out)
+        if period == "sleep_window":
+            sleep_tail_patterns = [
+                r"[，,]?\s*你这是打算现在过来[？?]?$",
+                r"[，,]?\s*你这是打算这会儿过来[？?]?$",
+                r"[，,]?\s*你这是打算这个点过来[？?]?$",
+                r"[，,]?\s*你现在打算过来[？?]?$",
+                r"[，,]?\s*你这会儿打算过来[？?]?$",
+                r"[，,]?\s*你这个点打算过来[？?]?$",
+                r"[，,]?\s*现在还可以订包厢吗[？?]?$",
+                r"[，,]?\s*现在还来不来[？?]?$",
+                r"[，,]?\s*现在过来吗[？?]?$",
+                r"[，,]?\s*这会儿过来吗[？?]?$",
+                r"[，,]?\s*这个点过来吗[？?]?$",
+                r"^\s*刚不是说过了嘛[，,。！？!?…]*",
+                r"[，,]?\s*你到底来不来嘛[，,。！？!?…]*",
+                r"[，,]?\s*你到底来不来[，,。！？!?…]*",
+                r"[，,]?\s*你是不是存心想折腾我不让我睡呀[，,。！？!?…]*",
+                r"[，,]?\s*你是不是故意不让我睡[，,。！？!?…]*",
+                r"[，,]?\s*这么晚还不睡呀[，,。！？!?…]*",
+                r"[，,]?\s*困死了[，,。！？!?…]*",
+            ]
+            for pattern in sleep_tail_patterns:
+                out = re.sub(pattern, "", out)
+            out = re.sub(r"[.。…]{2,}$", "。", out)
+            out = out.rstrip("，,？? ").strip()
+            if out and out[-1] not in "。！？!?":
+                out = out + "。"
         return out.strip()
 
     @staticmethod
@@ -1028,7 +1144,6 @@ class CompanionEngine:
         out = re.sub(r"\s{2,}", " ", out).strip()
         return out
 
-    @staticmethod
     @staticmethod
     def _normalize_phrase_anchor(text: str) -> str:
         return re.sub(r"[^\u4e00-\u9fff0-9A-Za-z]+", "", (text or "")).strip().lower()
@@ -1082,6 +1197,16 @@ class CompanionEngine:
         if not latest_norm and not reply_norm:
             return False
 
+        party_size = self._extract_party_size(latest_text)
+        is_budget_turn = bool(
+            party_size and (
+                self._asks_budget_explicitly(latest_text)
+                or self._looks_like_budget_followup(latest_text, recent, party_size)
+            )
+        )
+        if is_budget_turn:
+            return False
+
         user_norms = [
             self._normalize_phrase_anchor(msg.content)
             for msg in recent[-window:]
@@ -1109,13 +1234,6 @@ class CompanionEngine:
         return compact[:max_chars].rstrip("\uff0c\u3002\uff01\uff1f,.!?;\uff1b:\uff1a")
 
     def _build_repeat_spam_decision(self) -> ReplyDecision:
-        if self.rng.random() < 0.5:
-            return ReplyDecision(
-                type="reply",
-                text=bytes(r"\u600e\u4e48\u5566", "ascii").decode("unicode_escape"),
-                recommended_delay_ms=self.rng.randint(500, 1200),
-                reason="repeat_spam_question",
-            )
         return ReplyDecision(type="noreply", recommended_delay_ms=0, reason="repeat_spam")
 
 
@@ -1354,7 +1472,14 @@ class CompanionEngine:
             self.bible.get("speech_style", {}).get("forbidden_fillers")
             or ["哎呀", "呀", "呢"]
         )
-        style["matched_scene_keys"] = self._detect_scene_keys(user_text, self._get_recent(user_id), state, time_context=time_context)
+        recent_for_style = self._get_recent(user_id)
+        style["matched_scene_keys"] = self._detect_scene_keys(user_text, recent_for_style, state, time_context=time_context)
+        explicit_party_size = self._extract_party_size(user_text)
+        style["budget_followup_hint"] = False
+        style["budget_followup_party_size"] = 0
+        if explicit_party_size and self._looks_like_budget_followup(user_text, recent_for_style, explicit_party_size):
+            style["budget_followup_hint"] = True
+            style["budget_followup_party_size"] = explicit_party_size
         style.update(time_context or {})
         style["short_reply_mode"] = False
         short_cfg = self.bible.get("short_sentence_policy") or {}
@@ -1551,19 +1676,24 @@ class CompanionEngine:
             time_context=(time_context or {}),
         )
         style = self._build_style(user_id, state, user_text, cls, time_context=time_context)
-
-        for _ in range(5):
-            candidate = self.generator.generate(self.bible, style, ctx)
-            candidate = self._apply_turn_style_adjustments(user_id, candidate, style)
-            if self._leaks_ai_identity(candidate):
-                continue
-            if self._is_hostile_reply(candidate):
-                continue
-            if self._has_recent_phrase_repetition(candidate, recent, window=20):
-                continue
-            if not self.rep_guard.is_repetitive(user_id, candidate):
-                return candidate
-        return self._soft_deescalation_reply()
+        candidate = self.generator.generate(self.bible, style, ctx)
+        candidate = self._apply_turn_style_adjustments(user_id, candidate, style)
+        fallback_budget_reply = None
+        if bool(style.get("budget_followup_hint", False)):
+            fallback_budget_reply = self._format_budget_estimate_reply(int(style.get("budget_followup_party_size", 0) or 0))
+            if fallback_budget_reply and not self._looks_like_budget_answer(candidate):
+                return fallback_budget_reply
+        if self._leaks_ai_identity(candidate) or self._is_hostile_reply(candidate):
+            return fallback_budget_reply or self._soft_deescalation_reply()
+        if self._has_recent_phrase_repetition(candidate, recent, window=20) or self.rep_guard.is_repetitive(user_id, candidate):
+            if fallback_budget_reply:
+                return fallback_budget_reply
+            downgraded = self._sanitize_booking_pitch_frequency(candidate, recent, window=20)
+            downgraded = self._split_short_reply((downgraded or candidate), max_chars=16)
+            if downgraded and downgraded != candidate:
+                return downgraded
+            return self._soft_deescalation_reply()
+        return candidate
 
     @staticmethod
     def _parse_multi_replies(raw: str, max_replies: int = 3) -> list[str]:
@@ -1642,31 +1772,36 @@ class CompanionEngine:
         system_prompt = build_system_prompt(self.bible, style) + reply_rule
         batch_lines = "\n".join([f"- {text}" for text in latest_user_messages if text.strip()])
         user_prompt = build_user_prompt(ctx, role_name=self.role_name) + f"\n\n本次用户连续消息：\n{batch_lines}\n"
-
-        for _ in range(3):
-            raw = self.generator.chat(system_prompt, user_prompt, temperature=0.75)
-            replies = self._parse_multi_replies(raw, max_replies=max_replies)
-            cleaned = []
-            question_injected = False
-            for reply in replies:
-                style_for_reply = dict(style)
-                if question_injected:
-                    style_for_reply["proactive_question_mode"] = False
-                reply = self._apply_turn_style_adjustments(user_id, reply, style_for_reply)
-                if ("？" in reply or "?" in reply) and style_for_reply.get("proactive_question_mode"):
-                    question_injected = True
-                if self._leaks_ai_identity(reply):
-                    continue
-                if self._is_hostile_reply(reply):
-                    continue
-                if self._has_recent_phrase_repetition(reply, recent, window=20):
-                    continue
-                if self.rep_guard.is_repetitive(user_id, reply):
-                    continue
-                cleaned.append(reply)
-            if cleaned:
-                return cleaned
-        return [self._generate_single_text(user_id, latest_text, state, recent, cls, time_context=time_context)]
+        raw = self.generator.chat(system_prompt, user_prompt, temperature=0.75)
+        replies = self._parse_multi_replies(raw, max_replies=max_replies)
+        cleaned = []
+        question_injected = False
+        fallback_reply = ""
+        fallback_budget_reply = None
+        if bool(style.get("budget_followup_hint", False)):
+            fallback_budget_reply = self._format_budget_estimate_reply(int(style.get("budget_followup_party_size", 0) or 0))
+        for reply in replies:
+            style_for_reply = dict(style)
+            if question_injected:
+                style_for_reply["proactive_question_mode"] = False
+            reply = self._apply_turn_style_adjustments(user_id, reply, style_for_reply)
+            if ("？" in reply or "?" in reply) and style_for_reply.get("proactive_question_mode"):
+                question_injected = True
+            if fallback_budget_reply and not self._looks_like_budget_answer(reply):
+                fallback_reply = fallback_budget_reply
+                continue
+            if self._leaks_ai_identity(reply) or self._is_hostile_reply(reply):
+                continue
+            if self._has_recent_phrase_repetition(reply, recent, window=20) or self.rep_guard.is_repetitive(user_id, reply):
+                if not fallback_reply:
+                    fallback_reply = fallback_budget_reply or self._split_short_reply((self._sanitize_booking_pitch_frequency(reply, recent, window=20) or reply), max_chars=16)
+                continue
+            cleaned.append(reply)
+        if cleaned:
+            return cleaned
+        if fallback_reply:
+            return [fallback_reply]
+        return [fallback_budget_reply or self._soft_deescalation_reply()]
 
     def _build_priority_template_reply(self, latest_text: str, recent: list[Message], time_context: dict | None = None) -> tuple[str | None, str | None]:
         # Keep only a small, ordered set of deterministic replies ahead of model generation.
