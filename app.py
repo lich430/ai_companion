@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -509,14 +509,22 @@ class CompanionEngine:
         return ""
 
     @staticmethod
-    def _contains_booking_terms(text: str) -> bool:
+    def _contains_marketing_push_terms(text: str) -> bool:
         raw = (text or "").strip()
-        booking_terms = ["留包", "留个包", "留包厢", "留位置", "留位", "提前安排", "安排包厢"]
-        return any(term in raw for term in booking_terms)
+        if not raw:
+            return False
+        push_terms = [
+            "留包", "留个包", "留包厢", "留位置", "留位", "提前安排", "安排包厢",
+            "过来玩", "过来喝酒", "来喝酒", "来店里", "你过来", "快来吧", "过来吧",
+            "今晚过来", "现在过来", "打算今晚过来吗",
+        ]
+        if any(term in raw for term in push_terms):
+            return True
+        return bool(re.search(r"(过来|来店里|来喝酒|过来喝酒|快来).{0,6}(吧|吗|呀|啊)?", raw))
 
-    def _booking_pitch_count(self, recent: list[Message], window: int = 20) -> int:
+    def _booking_pitch_count(self, recent: list[Message], window: int = 30) -> int:
         assistant_recent = [m.content.strip() for m in recent[-window:] if m.role == "assistant" and m.content.strip()]
-        return sum(1 for item in assistant_recent if self._contains_booking_terms(item))
+        return sum(1 for item in assistant_recent if self._contains_marketing_push_terms(item))
 
     def _recent_user_party_size(self, latest_text: str, recent: list[Message]) -> int | None:
         party_size = self._extract_party_size(latest_text)
@@ -540,6 +548,38 @@ class CompanionEngine:
             return False
         compact = re.sub(r"\s+", "", latest).strip("/？?！!。.")
         return compact in {"多少", "多钱"}
+
+    def _is_multi_intent_gift_query(self, latest_text: str) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return False
+        asks_gift = self._contains_any(latest, ["送酒", "送酒水", "送不送酒", "送不", "酒水送", "可以送酒"])
+        asks_amount = self._contains_any(latest, ["送多少", "送几瓶", "送几箱", "送多少酒"])
+        asks_enough = self._contains_any(latest, ["别不够喝", "不够喝", "酒水不够", "酒别不够", "够不够喝", "怕不够喝"])
+        return sum(1 for x in (asks_gift, asks_amount, asks_enough) if x) >= 2
+
+    def _is_self_takeaway_negotiation(self, latest_text: str, recent: list[Message]) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return False
+        direct_self_invite = self._contains_any(latest, ["跟我走", "跟我回去", "带走你", "跟我睡", "带你走", "你能跟我走", "你跟我走"]) and "你" in latest
+        price_followup = self._contains_any(latest, ["你说个价格", "说个价格", "什么价格", "开个价", "报个价", "多少钱"]) and ("你" in latest or any((m.role == "user" and "你" in (m.content or "") and self._contains_any(m.content, ["跟我走", "跟我回去", "带走你", "跟我睡", "带你走"])) for m in recent[-6:]))
+        recent_self_invite = False
+        for msg in reversed(recent[-6:]):
+            if msg.role != "user":
+                continue
+            content = (msg.content or "").strip()
+            if "你" in content and self._contains_any(content, ["跟我走", "跟我回去", "带走你", "跟我睡", "带你走"]):
+                recent_self_invite = True
+                break
+        return bool(direct_self_invite or (price_followup and recent_self_invite))
+
+    @staticmethod
+    def _looks_like_third_party_girl_subject(text: str) -> bool:
+        raw = (text or "").strip()
+        if not raw:
+            return False
+        return any(token in raw for token in ["女孩子自己愿意", "妹子自己愿意", "看女孩子", "看妹子", "看她们", "其他女孩子", "别的女孩子", "别的妹子"])
 
     def _asks_budget_explicitly(self, latest_text: str) -> bool:
         latest = (latest_text or "").strip()
@@ -605,11 +645,28 @@ class CompanionEngine:
                 seen_budget_answer = True
         return seen_same_budget_question and seen_budget_answer
 
+    def _is_drink_box_price_query(self, latest_text: str) -> bool:
+        latest = (latest_text or "").strip()
+        if not latest:
+            return False
+        has_box = self._contains_any(latest, ["一箱", "整箱", "多少钱一箱", "一箱多少钱", "多少一箱"])
+        if not has_box:
+            return False
+        has_drink = self._contains_any(latest, ["酒", "酒水", "啤酒", "纯生", "雪花", "百威"])
+        if not has_drink:
+            return False
+        explicit_price = self._contains_any(latest, ["多少钱", "多少", "价格", "什么价", "怎么卖"])
+        return explicit_price
+
     def _build_budget_reply(self, latest_text: str, recent: list[Message]) -> str | None:
         latest = (latest_text or "").strip()
         if not latest:
             return None
         if self._is_contact_request(latest):
+            return None
+        if self._is_drink_box_price_query(latest):
+            return None
+        if self._find_drink_item(latest)[1] is not None or self._find_drink_candidates(latest):
             return None
         if self._contains_any(latest, ["出台", "出台价格", "出台多少钱", "能出台吗", "可以出台吗", "出去的美女", "带走", "跟我走"]):
             return None
@@ -675,9 +732,13 @@ class CompanionEngine:
         if not latest:
             return False
         contact_tokens = [
-            "qq", "q号", "q多少", "qq多少", "微信", "vx", "vx", "手机号", "手机号码", "电话", "联系方式", "联系你", "怎么联系你",
+            "qq", "q号", "q多少", "qq多少", "微信", "vx", "手机号", "手机号码", "电话", "联系方式", "怎么联系你",
         ]
-        return self._contains_any(latest, contact_tokens)
+        if self._contains_any(latest, ["等会联系你", "一会联系你", "回头联系你", "晚点联系你", "待会联系你", "之后联系你"]):
+            return False
+        if self._contains_any(latest, contact_tokens):
+            return True
+        return bool(re.search(r"(留|给).{0,4}(联系|方式|电话|微信|qq)", latest))
 
     def _is_location_request(self, latest_text: str) -> bool:
         latest = (latest_text or "").strip().lower()
@@ -732,6 +793,10 @@ class CompanionEngine:
             return "你好"
         if plain.startswith("我是") and len(plain) <= 6:
             return "你好。"
+        if plain in {"在吗", "在嘛", "在不在", "在吗美女", "在嘛美女", "在吗靓女", "在不在美女", "在不在靓女", "美女在吗", "靓女在吗"}:
+            return "在呢"
+        if plain.startswith("在吗") or plain.startswith("在嘛") or plain.endswith("在吗"):
+            return "在呢"
         return None
 
     def _matches_sales_scene(self, text: str, scene: str) -> bool:
@@ -772,8 +837,12 @@ class CompanionEngine:
                 "patterns": [r"妹子.*(会不会玩|怎么玩|放得开)", r"(放得开|会来事|会玩).*吗"],
             },
             "quality": {
-                "tokens": ["妹子咋样", "妹子好看吗", "妹子漂亮吗", "妹子质量怎么样", "妹子质量咋样", "质量怎么样", "颜值怎么样", "妹子颜值", "靓不靓"],
+                "tokens": ["妹子咋样", "妹子好看吗", "妹子漂亮吗", "妹子质量怎么样", "妹子质量咋样", "质量怎么样", "颜值怎么样", "妹子颜值", "靓不靓", "有漂亮的吗", "公司有漂亮的吗", "你们公司有漂亮的吗", "有好看的吗"],
                 "patterns": [r"妹子.*(咋样|怎么样|好看|漂亮|颜值)", r"(质量|颜值).*(怎么样|咋样)"],
+            },
+            "relationship_status": {
+                "tokens": ["你有没有男朋友", "有男朋友吗", "有没有对象", "有对象吗", "你单身吗", "是不是单身", "现在单身吗"],
+                "patterns": [r"(有没有|有).*(男朋友|对象)", r"(单身).*(吗|呀)?", r"是不是.*单身"],
             },
             "age": {
                 "tokens": ["妹妹都是多大的", "妹子都是多大的", "妹子多大", "妹妹多大", "都多大", "年龄多大"],
@@ -831,6 +900,10 @@ class CompanionEngine:
                 "tokens": ["订房", "开包厢", "留个包", "留位", "安排一下", "定个包", "订个房", "开个包厢", "预定包厢", "预留包厢"],
                 "patterns": [r"(订|定|开|预定|预留).*(房|包|包厢)", r"留.*(位|包)", r"安排.*(一下|一个)"],
             },
+            "what_are_you_doing": {
+                "tokens": ["你在干嘛", "你现在在干嘛", "你现在干嘛", "你在干哈", "你现在zai干嘛", "zai干嘛", "在干嘛", "干嘛呢", "干哈呢"],
+                "patterns": [r"你.*(在|zai).*(干嘛|干哈)", r"(在|zai).*(干嘛|干哈)", r"干嘛呢", r"干哈呢"],
+            },
         }
         rule = rules.get(scene) or {}
         tokens = rule.get("tokens") or []
@@ -881,6 +954,12 @@ class CompanionEngine:
         if self._matches_sales_scene(latest, "not_enough_alcohol"):
             return "你这边可以点一些，我再送一些。"
 
+        if self._contains_any(latest, ["就一箱", "就一箱酒", "一箱酒嘛", "一箱吗", "就一箱吗"]) and (
+            self._recent_user_mentions(recent, ["送酒", "送酒水", "送不送酒", "送多少", "不够喝", "酒水别不够", "酒水不够"], window=8)
+            or self._contains_any(last_assistant, ["可以送", "你这边可以点一些，我再送一些。", "送酒水。"]) 
+        ):
+            return "你这边可以点一些，我再送一些。"
+
         if self._matches_sales_scene(latest, "light_drinking"):
             if self._recent_user_mentions(recent, ["酒水别不够", "不够喝", "酒水不够", "就一箱酒水"]):
                 return "没事，酒一定会安排好。"
@@ -893,6 +972,9 @@ class CompanionEngine:
 
         if self._matches_sales_scene(latest, "quality"):
             return "最近来了很多漂亮的新人"
+
+        if self._matches_sales_scene(latest, "relationship_status"):
+            return "单身呀。"
 
         if self._matches_sales_scene(latest, "age"):
             return "基本18到20左右"
@@ -908,12 +990,13 @@ class CompanionEngine:
         if self._matches_sales_scene(latest, "beauty_count"):
             return "很多呀"
 
-        if self._matches_sales_scene(latest, "vacuum"):
-            return "可以的"
-
         if self._matches_sales_scene(latest, "outside_girls"):
+            if self._contains_any(latest, ["价格", "多少钱", "什么价", "多少米", "大概多少"]):
+                return "这个要看你们怎么聊，我也可以帮你们协助沟通"
+            if self._contains_any(latest, ["准备好", "提前帮我", "别掉链子", "不能掉链子", "先安排好"]):
+                return "行，等你联系我，我先帮你沟通着。"
             return "有，你们自己沟通，我也可以协助你沟通"
-
+            return "有，你们自己沟通，我也可以协助你沟通"
         if self._matches_sales_scene(latest, "two_girls_request"):
             return "没问题，来了和我们经理说"
 
@@ -921,6 +1004,12 @@ class CompanionEngine:
             return "那是自然的，肯定让你玩的高兴"
 
         if self._matches_sales_scene(latest, "come_drink"):
+            if party_size or eta or self._recent_user_mentions(
+                recent,
+                ["多少钱", "人均", "预算", "需要多少钱", "大概多少", "消费多少", "平均每人", "每人消费", "几点到", "到店时间", "现在就过去", "现在过去", "快到了", "一会到", "差不多到了", "多久到"],
+                window=8,
+            ):
+                return None
             return "好，你们几个人"
 
         if self._matches_sales_scene(latest, "send_some_alcohol"):
@@ -947,9 +1036,36 @@ class CompanionEngine:
             return f"好，{room_label}先给你留着，你们快到了跟我说"
 
         if self._matches_sales_scene(latest, "booking"):
+            has_budget_context = self._recent_user_mentions(
+                recent,
+                ["多少钱", "人均", "预算", "需要多少钱", "大概多少", "消费多少", "平均每人", "每人消费"],
+                window=8,
+            )
+            has_eta_context = self._recent_user_mentions(
+                recent,
+                ["几点到", "到店时间", "现在就过去", "现在过去", "快到了", "一会到", "差不多到了", "多久到"],
+                window=8,
+            )
+            has_contextual_booking_info = bool(room_type or party_size or eta or has_budget_context or has_eta_context)
+            if has_contextual_booking_info:
+                return None
             if booking_count >= 1:
                 return "可以，你们几个人"
             return "可以，你们几个人，我先给你安排"
+
+        if self._matches_sales_scene(latest, "what_are_you_doing"):
+            period = str((time_context or {}).get("time_period_name", "") or "").strip()
+            replies = {
+                "wake_window": "刚醒，正收拾呢。",
+                "commute_window": "在去公司的路上。",
+                "afternoon_window": "在公司洗头化妆呢。",
+                "dinner_window": "在公司附近吃饭。",
+                "meeting_window": "在公司开会呢。",
+                "night_work_window": "在休息室待着。",
+                "late_chat_window": "刚收尾，正准备休息。",
+                "sleep_window": "刚睡呢，醒了回你。",
+            }
+            return replies.get(period, "在忙呢。")
 
         return None
 
@@ -974,7 +1090,10 @@ class CompanionEngine:
                 for name in names:
                     if not name:
                         continue
-                    if self._normalize_lookup_text(name) in normalized:
+                    normalized_name = self._normalize_lookup_text(name)
+                    if len(normalized_name) <= 1:
+                        continue
+                    if normalized_name in normalized:
                         return str(category), item
         return None, None
 
@@ -986,7 +1105,7 @@ class CompanionEngine:
         for category, items in self._get_drink_catalog().items():
             for item in items or []:
                 names = [str(item.get("name", "")).strip()] + [str(x).strip() for x in (item.get("aliases") or []) if str(x).strip()]
-                if any(self._normalize_lookup_text(name) and self._normalize_lookup_text(name) in normalized for name in names):
+                if any((normalized_name := self._normalize_lookup_text(name)) and len(normalized_name) > 1 and normalized_name in normalized for name in names):
                     out.append((str(category), item))
         return out
 
@@ -1008,14 +1127,18 @@ class CompanionEngine:
         unit = str(item.get("unit", "")).strip()
         price = item.get("price", "")
         price_text = str(int(price)) if isinstance(price, (int, float)) and float(price).is_integer() else str(price).strip()
-        return f"{name}{price_text}元/{unit}".strip("/")
+        if price_text:
+            return f"{name}{price_text}元/{unit}".strip("/")
+        return name
 
     @staticmethod
     def _format_short_price(item: dict) -> str:
         price = item.get("price", "")
         unit = str(item.get("unit", "")).strip() or "瓶"
         price_text = str(int(price)) if isinstance(price, (int, float)) and float(price).is_integer() else str(price).strip()
-        return f"{price_text}元/{unit}"
+        if price_text:
+            return f"{price_text}元/{unit}"
+        return "有"
 
     def _list_catalog_by_category(self, category: str) -> str:
         items = self._get_drink_catalog().get(category) or []
@@ -1030,11 +1153,7 @@ class CompanionEngine:
         if not catalog:
             return None
 
-        history = recent or []
-        if self._contains_any(raw, ["能便宜吗", "能优惠吗", "送酒", "送不送酒", "酒水别不够", "不够喝", "人均", "需要多少钱", "出台什么价格", "图片", "照片", "妹子照片", "有图"]):
-            return None
-
-        if any(token in raw for token in ["一箱多少钱", "多少钱一箱", "啤酒多少一箱", "纯生多少一箱", "雪花多少一箱", "酒水多少一箱"]):
+        if self._is_drink_box_price_query(raw):
             marketing = self.bible.get("marketing") or {}
             store_info = marketing.get("store_info") or {}
             drink_info = store_info.get("drink_info") or {}
@@ -1045,35 +1164,36 @@ class CompanionEngine:
 
         matched_category, matched_item = self._find_drink_item(raw)
         matched_candidates = self._find_drink_candidates(raw)
-        asked_specific = bool(re.search(r"(有|点|喝|上|来).{0,12}?(酒|啤酒|洋酒|红酒|饮料)|有.{0,12}吗", raw))
-        asked_menu = (
-            any(token in raw for token in ["有什么酒", "都有什么酒", "酒单", "酒水", "啤酒", "洋酒", "红酒", "饮料"])
-            or bool(re.search(r"有什么(啤酒|洋酒|红酒|饮料)", raw))
-            or bool(re.search(r"(啤酒|洋酒|红酒|饮料)有哪些", raw))
-        )
-        inferred_category = self._infer_drink_category(raw)
-
-        # Broad menu/category questions are better handled by the model with the
-        # injected store catalog in prompt. Keep deterministic rules only for
-        # exact item/box-price lookups.
-        if asked_menu:
+        if not matched_item and not matched_candidates:
             return None
 
-        if asked_specific and len(matched_candidates) >= 2:
-            price_text = "、".join(self._format_short_price(item) for _, item in matched_candidates[:2])
-            return f"有 {price_text}"
+        asked_specific = bool(re.search(r"(有|点|上|来|喝|想喝|能不能有|能上).{0,12}?(酒|啤酒|洋酒|红酒|饮料|纯生|雪花|百威|轩尼诗|马爹利|芝华士|黑方|奔富)", raw)) or ("吗" in raw)
 
-        if matched_item and asked_specific:
-            return f"有 {self._format_short_price(matched_item)}"
-
-        if asked_specific and not matched_item:
-            return "没有"
+        if len(matched_candidates) >= 2:
+            unique_prices: list[str] = []
+            seen = set()
+            for _, item in matched_candidates:
+                short_price = self._format_short_price(item)
+                if short_price not in seen:
+                    seen.add(short_price)
+                    unique_prices.append(short_price)
+            if unique_prices:
+                if all(value == "有" for value in unique_prices[:2]):
+                    return "有"
+                return f"有 {'、'.join(unique_prices[:2])}"
 
         if matched_item:
-            return f"有 {self._format_short_price(matched_item)}"
+            short_price = self._format_short_price(matched_item)
+            if short_price == "有":
+                item_name = str(matched_item.get("name", "") or "").strip()
+                if self._contains_any(raw, ["多少钱", "多少", "价格", "什么价", "怎么卖"]):
+                    return f"有{item_name}，不过我也不知道多少钱"
+                return "有"
+            return f"有 {short_price}"
 
-        if history and self._recent_user_mentions(history, ["有没有图片","有妹子照片吗", "有妹子照片", "妹子照片", "图片"], window=20):
-            return None
+        if asked_specific and matched_candidates:
+            short_price = self._format_short_price(matched_candidates[0][1])
+            return "有" if short_price == "有" else f"有 {short_price}"
 
         return None
 
@@ -1186,7 +1306,7 @@ class CompanionEngine:
                 out = re.sub(r"\u521a\u4e0b\u73ed", "\u521a\u5fd9\u5b8c\u4e00\u9635", out)
                 out = re.sub(r"(\u5df2\u7ecf|\u90fd)?\u6536\u5de5\u4e86", "\u8fd8\u6ca1\u6536\u5de5", out)
                 out = re.sub(r"\u4e0b\u73ed[\u3002.!\uff01?\uff1f]*$", "\u8fd8\u6ca1\u4e0b\u73ed", out)
-        if period == "sleep_window":
+        if period in {"sleep_window", "late_chat_window"}:
             sleep_tail_patterns = [
                 r"[，,]?\s*你这是打算现在过来[？?]?$",
                 r"[，,]?\s*你这是打算这会儿过来[？?]?$",
@@ -1224,7 +1344,7 @@ class CompanionEngine:
         latest = (latest_user_text or "").strip()
         period = str(time_context.get("time_period_name", "") or "").strip()
         high_intent = any(token in latest for token in ["过去", "来喝酒", "喝喝酒", "留个小包", "小包", "订房", "开包厢", "你陪我", "安排", "一个人"])
-        active_period = period in {"night_work_window", "dinner_window"}
+        active_period = period in {"night_work_window"}
         if not (high_intent and active_period):
             return out
 
@@ -1307,6 +1427,10 @@ class CompanionEngine:
             )
         )
         if is_budget_turn:
+            return False
+
+        explicit_drink_business_query = self._contains_any(latest_text, ["酒水", "洋酒", "啤酒", "红酒", "饮料"]) and self._contains_any(latest_text, ["价格", "多少钱", "介绍一下", "有些什么", "有什么", "怎么卖", "什么酒"])
+        if explicit_drink_business_query:
             return False
 
         user_norms = [
@@ -1436,46 +1560,47 @@ class CompanionEngine:
         return deduped
 
 
-    def _sanitize_booking_pitch_frequency(self, text: str, recent: list[Message], window: int = 20) -> str:
+    def _sanitize_booking_pitch_frequency(self, text: str, recent: list[Message], window: int = 30) -> str:
         out = (text or "").strip()
         if not out:
             return out
 
-        def u(value: str) -> str:
-            return value.encode("ascii").decode("unicode_escape") if "\\u" in value else value
-
         recent_msgs = recent or []
-        pitch_terms = [
-            u(r"留包厢"),
-            u(r"留个包厢"),
-            u(r"留位置"),
-            u(r"提前安排"),
-            u(r"给你安排包厢"),
-        ]
         pitch_count = 0
         for msg in recent_msgs[-window:]:
             if msg.role != "assistant":
                 continue
             content = (msg.content or "").strip()
-            if any(term in content for term in pitch_terms):
+            if self._contains_marketing_push_terms(content):
                 pitch_count += 1
         if pitch_count < 1:
             return out
 
         replacements = {
-            u(r"我先给你安排"): u(r"我知道了"),
-            u(r"到了不用等哦"): u(r"到了跟我说就行"),
-            u(r"你们快到了跟我说"): u(r"你们到了跟我说"),
+            "我先给你安排": "我知道了",
+            "到了不用等哦": "到了跟我说就行",
+            "你们快到了跟我说": "你们到了跟我说",
+            "是打算今晚过来吗": "",
+            "打算今晚过来吗": "",
+            "你过来玩": "",
+            "今晚过来吧": "",
+            "快来吧": "",
+            "过来吧": "",
+            "来店里": "",
+            "过来喝酒": "",
+            "来喝酒": "",
+            "现在过来": "",
         }
         for src, dst in replacements.items():
             out = out.replace(src, dst)
-        out = re.sub(r"，?[^，。！？!?\n]*(留包|留个包|留包厢|预留包厢|留位置|留位|提前安排|安排包厢)[^，。！？!?\n]*", "", out)
+        out = re.sub(r"，?[^，。！？!?\n]*(留包|留个包|留包厢|预留包厢|留位置|留位|提前安排|安排包厢|过来玩|过来喝酒|来喝酒|来店里|快来吧|过来吧|你过来|今晚过来|打算今晚过来吗|现在过来)[^，。！？!?\n]*", "", out)
         out = re.sub(r"\s{2,}", " ", out)
-        out = out.replace(u(r"。。"), u(r"。"))
-        out = out.replace(u(r"，，"), u(r"，"))
-        out = out.replace(u(r"，。"), u(r"。"))
+        out = out.replace("。。", "。")
+        out = out.replace("，，", "，")
+        out = out.replace("，。", "。")
         out = re.sub(r"^[，。！？!?\s]+", "", out)
         return out.strip()
+
     def _emotion_probe_policy(self) -> dict:
         policy = self.bible.get("emotion_probe_policy") or {}
         return policy if isinstance(policy, dict) else {}
@@ -1579,6 +1704,8 @@ class CompanionEngine:
         explicit_party_size = self._extract_party_size(user_text)
         style["budget_followup_hint"] = False
         style["budget_followup_party_size"] = 0
+        style["gift_combo_hint"] = self._is_multi_intent_gift_query(user_text)
+        style["self_takeaway_negotiation"] = self._is_self_takeaway_negotiation(user_text, recent_for_style)
         if explicit_party_size and self._looks_like_budget_followup(user_text, recent_for_style, explicit_party_size):
             style["budget_followup_hint"] = True
             style["budget_followup_party_size"] = explicit_party_size
@@ -1618,13 +1745,7 @@ class CompanionEngine:
         if not out:
             return out
 
-        if style.get("short_reply_mode"):
-            max_chars = max(4, int(style.get("short_reply_max_chars", 14) or 14))
-            first = re.split(r"[。！？!?\n]", out)[0].strip() or out
-            if len(first) > max_chars:
-                first = first[:max_chars].rstrip("，。！？,.!?;；:：")
-            out = first
-
+        # 短回复长度主要交给模型侧控制，这里不再按字符硬截断，避免半句输出。
         if style.get("proactive_question_mode"):
             q = str(style.get("proactive_question_template", "") or "").strip()
             if q and ("？" not in out and "?" not in out):
@@ -1785,13 +1906,14 @@ class CompanionEngine:
             fallback_budget_reply = self._format_budget_estimate_reply(int(style.get("budget_followup_party_size", 0) or 0))
             if fallback_budget_reply and not self._looks_like_budget_answer(candidate):
                 return fallback_budget_reply
+        if bool(style.get("self_takeaway_negotiation", False)) and self._looks_like_third_party_girl_subject(candidate):
+            return "这个得看我们聊得怎么样呀，别这么急着谈价格。"
         if self._leaks_ai_identity(candidate) or self._is_hostile_reply(candidate):
             return fallback_budget_reply or self._soft_deescalation_reply()
-        if self._has_recent_phrase_repetition(candidate, recent, window=20) or self.rep_guard.is_repetitive(user_id, candidate):
+        if self._has_recent_phrase_repetition(candidate, recent, window=30) or self.rep_guard.is_repetitive(user_id, candidate):
             if fallback_budget_reply:
                 return fallback_budget_reply
-            downgraded = self._sanitize_booking_pitch_frequency(candidate, recent, window=20)
-            downgraded = self._split_short_reply((downgraded or candidate), max_chars=16)
+            downgraded = (self._sanitize_booking_pitch_frequency(candidate, recent, window=30) or candidate).strip()
             if downgraded and downgraded != candidate:
                 return downgraded
             return self._soft_deescalation_reply()
@@ -1892,11 +2014,15 @@ class CompanionEngine:
             if fallback_budget_reply and not self._looks_like_budget_answer(reply):
                 fallback_reply = fallback_budget_reply
                 continue
+            if bool(style.get("self_takeaway_negotiation", False)) and self._looks_like_third_party_girl_subject(reply):
+                if not fallback_reply:
+                    fallback_reply = "这个得看我们聊得怎么样呀，别这么急着谈价格。"
+                continue
             if self._leaks_ai_identity(reply) or self._is_hostile_reply(reply):
                 continue
-            if self._has_recent_phrase_repetition(reply, recent, window=20) or self.rep_guard.is_repetitive(user_id, reply):
+            if self._has_recent_phrase_repetition(reply, recent, window=30) or self.rep_guard.is_repetitive(user_id, reply):
                 if not fallback_reply:
-                    fallback_reply = fallback_budget_reply or self._split_short_reply((self._sanitize_booking_pitch_frequency(reply, recent, window=20) or reply), max_chars=16)
+                    fallback_reply = fallback_budget_reply or (self._sanitize_booking_pitch_frequency(reply, recent, window=30) or reply).strip()
                 continue
             cleaned.append(reply)
         if cleaned:
@@ -1905,17 +2031,26 @@ class CompanionEngine:
             return [fallback_reply]
         return [fallback_budget_reply or self._soft_deescalation_reply()]
 
-    def _build_priority_template_reply(self, latest_text: str, recent: list[Message], time_context: dict | None = None) -> tuple[str | None, str | None]:
+    def _build_priority_template_reply(
+        self,
+        latest_text: str,
+        recent: list[Message],
+        time_context: dict | None = None,
+        allow_sales_template: bool = True,
+    ) -> tuple[str | None, str | None]:
         # Keep only a small, ordered set of deterministic replies ahead of model generation.
         greeting_reply = self._build_greeting_reply(latest_text, recent)
         if greeting_reply:
             return greeting_reply, "greeting"
+        if self._is_multi_intent_gift_query(latest_text):
+            return None, None
         budget_reply = self._build_budget_reply(latest_text, recent)
         if budget_reply:
             return budget_reply, "budget"
-        sales_reply = self._build_sales_template_reply(latest_text, recent, time_context or {})
-        if sales_reply:
-            return sales_reply, "sales_template"
+        if allow_sales_template:
+            sales_reply = self._build_sales_template_reply(latest_text, recent, time_context or {})
+            if sales_reply:
+                return sales_reply, "sales_template"
         drink_menu_reply = self._build_drink_menu_reply(latest_text, recent=recent)
         if drink_menu_reply:
             return drink_menu_reply, "drink_menu"
@@ -2127,7 +2262,12 @@ class CompanionEngine:
         recent = self._get_recent(uid)
         queued_items = []
 
-        priority_reply, priority_source = self._build_priority_template_reply(cleaned[-1], recent, time_context)
+        priority_reply, priority_source = self._build_priority_template_reply(
+            cleaned[-1],
+            recent,
+            time_context,
+            allow_sales_template=(len(cleaned) <= 1),
+        )
         if self._is_quiet_hours() and not combined["urgent"]:
             decisions = [ReplyDecision(type="noreply", recommended_delay_ms=0, reason="quiet_hours")]
         elif self._should_ignore_repeated_budget_question(cleaned[-1], prior_recent):
@@ -2289,4 +2429,21 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

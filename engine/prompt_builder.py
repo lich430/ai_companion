@@ -141,6 +141,7 @@ def _build_marketing_block(bible: dict, style: dict) -> str:
         f"- 小费标准：公主{tip_standard.get('hostess_tip') or ''}；少爷{tip_standard.get('waiter_tip') or ''}",
         f"- 服务内容：{room_package.get('service_content') or ''}",
         f"- 酒水信息：啤酒{drink_info.get('beer') or ''}；洋酒{drink_info.get('foreign_liquor') or ''}",
+        f"- 小吃/果盘：{store_info.get('snack_info') or ''}",
         f"- 人均参考：平均每人消费1500左右",
         f"- 充卡政策：{recharge_policy.get('base') or ''}",
         f"- 订房任务规则：{recharge_policy.get('room_task_rule') or store_info.get('room_task_rule') or ''}",
@@ -157,7 +158,10 @@ def _build_marketing_block(bible: dict, style: dict) -> str:
             if not name:
                 continue
             price_text = str(int(price)) if isinstance(price, (int, float)) and float(price).is_integer() else str(price).strip()
-            parts.append(f"{name}{price_text}元/{unit}")
+            if price_text:
+                parts.append(f"{name}{price_text}元/{unit}")
+            else:
+                parts.append(name)
         if parts:
             catalog_lines.append(f"- {category}：{'、'.join(parts)}")
 
@@ -198,18 +202,18 @@ def _build_worktime_conversion_block(bible: dict, style: dict) -> str:
     is_active = current_period in set(policy.get("active_time_blocks") or [])
 
     lines = [
-        "工作时段接待规则：",
+        "工作时段引导消费规则：",
         f"- 当前时段：{current_label}（{current_period or 'unknown'}）",
         f"- 业务优先时段：{active_blocks}",
         f"- 潜在到店/订房意向关键词：{intent_keywords}",
     ]
     if is_active:
-        lines.append("- 当前命中业务优先时段。只要用户明确想来商K、找场子、问位置、问订房，就要积极接待和安排。")
+        lines.append("- 当前命中业务优先时段。只要用户明确想来商K、找场子、问位置、问订房，就要自然引导并安排。")
         lines.append("- 不要用“我在忙”“改天吧”“现在不方便”这类话拒绝用户。")
         lines.append("- 优先给出落地信息：店名、地址、营业状态、怎么来、能否帮订房。")
-        lines.append("- 如果用户已经明确有到店意向，直接回答当前问题并自然接待，不要把话题硬拐到留位、留包厢。")
+        lines.append("- 如果用户已经明确有到店意向，直接回答当前问题并自然往消费安排上接，不要把话题硬拐到留位、留包厢。")
     else:
-        lines.append("- 当前不在核心接待时段，回答保持自然即可，不要像硬广复读。")
+        lines.append("- 当前不在核心推进时段，回答保持自然即可，不要像硬广复读。")
     lines.extend([f"- {rule}" for rule in rules[:8]])
     return "\n".join(lines)
 
@@ -223,14 +227,14 @@ def _build_sales_flow_block(bible: dict, style: dict) -> str:
         return ""
 
     current_period = str(style.get("time_period_name", "") or "").strip()
-    active = current_period in {"night_work_window", "dinner_window"}
-    lines = ["商务接待话术节奏："]
+    active = current_period in {"night_work_window"}
+    lines = ["聊天引导消费话术节奏："]
     if active:
-        lines.append("- 当前属于可接待时段，优先使用接待推进链路，不要闲聊太久。")
-        lines.append("- 标准节奏：先回答当前核心问题，再自然确认到店时间和接待动作。")
+        lines.append("- 当前属于可推进消费时段，优先使用引导消费链路，不要闲聊太久。")
+        lines.append("- 标准节奏：先回答当前核心问题，再自然确认到店时间和后续安排。")
         lines.append("- 回复要像真实营销人员：短、直接、落地，句句往安排上走。")
     else:
-        lines.append("- 非核心接待时段也可以参考这个节奏，但保持自然。")
+        lines.append("- 非核心推进时段也可以参考这个节奏，但保持自然。")
     if pricing_guidance:
         lines.append("- 销售报价口径：")
         lines.append("  - 用户问价格、预算、人均时，优先按以下口径直接回答，不要先讲酒水或推进消费。")
@@ -351,7 +355,7 @@ def _build_turn_control_block(style: dict) -> str:
     lines = []
     if style.get("short_reply_mode"):
         lines.append(
-            f"- 本轮短句模式：是。尽量 1 句，控制在 {int(style.get('short_reply_max_chars', 14))} 字内。"
+            f"- 本轮短句模式：是。尽量 1 句，控制在 {int(style.get('short_reply_max_chars', 14))} 字内，但必须语义完整，不要把一句话砍成半句。"
         )
     if style.get("proactive_question_mode"):
         q = str(style.get("proactive_question_template", "") or "").strip()
@@ -476,8 +480,10 @@ def _build_current_time_hard_rules_block(bible: dict, style: dict) -> str:
     if current_name == "sleep_window":
         lines.append("- 当前在睡觉时间，不要说在上班、在吃午饭、刚出门。")
         lines.append("- 当前已接近或进入打烊后休息时段，不要再问对方现在是不是立刻过来、现在还来不来、现在要不要订包厢。")
-    if current_name in {"lunch_window", "dinner_window"}:
+    if current_name == "dinner_window":
         lines.append("- 当前是饭点，只有在这个时段才适合自然说正在吃饭或刚吃两口。")
+    if current_name == "late_chat_window":
+        lines.append("- 当前已经打烊，不再安排新的客户过来；可以自然聊天，但不要再主动安排现在到店、现在订包厢。")
     if business_hours:
         lines.append(f"- 角色营业/作息参考：{business_hours}")
     return "\n".join(lines)
@@ -526,6 +532,31 @@ def _build_budget_followup_block(style: dict) -> str:
 """
 
 
+def _build_gift_combo_block(style: dict) -> str:
+    if not bool(style.get("gift_combo_hint", False)):
+        return ""
+    return """
+送酒组合问题提示：
+- 用户这句同时在问能不能送酒、送多少、够不够喝。
+- 不要只回答其中一个点。
+- 用1到2句把这几个点一起回答完整，口语一点。
+- 更合理的方向是：可以送一些、先点一些、不够喝再补，不要只回“送酒水”。
+"""
+
+
+def _build_self_takeaway_block(style: dict) -> str:
+    if not bool(style.get("self_takeaway_negotiation", False)):
+        return ""
+    return """
+本人被带走/谈价格场景提示：
+- 当前用户问的是你本人能不能跟他走，后面继续追问“你说个价格”时，主语仍然是你本人。
+- 不要把“你”偷换成“别的女孩子”“妹子”“她们”或“看女孩子自己愿不愿意”。
+- 这轮必须用第一人称来回应，围绕“我”来回答，不要切到第三人称。
+- 如果不想直接报价格，也要顺着当前暧昧气氛回答，不要答非所问。
+- 更合理的方向是：先稳住气氛、保留余地、别太快把话说死，但主语始终是你本人。
+"""
+
+
 def _build_model_decision_block(style: dict) -> str:
     current_period = str(style.get("time_period_name", "") or "").strip() or "unknown"
     return f"""模型决策优先规则：
@@ -536,7 +567,8 @@ def _build_model_decision_block(style: dict) -> str:
 - 不要主动提“留包厢”“预留包厢”“留位置”“留位”这类话题，除非用户自己先明确提出。
 - 如果用户问预算、人均、酒水够不够、送不送、妹子质量、年龄、位置、玩法，先结合上下文完整理解问题，再给简短自然的答案。
 - 如果用户一条消息里有多个信息点，先回答核心诉求，不要只回其中一个次要关键词。
-- 最近20条消息里尽量避免重复同一句话或同一种意思的营销表达，特别是重复的营销推进话术不要机械重复。
+- 最近30条消息里尽量避免重复同一句话或同一种意思的营销表达，特别是重复的营销推进话术不要机械重复。
+- 如果最近已经多次说过“过来玩”“快来吧”“来店里”“今晚过来”这类推进话术，这一轮就不要再重复提。
 - 当前时段为：{current_period}。回复既要符合这个时段，也要符合当前对话的真实走向。
 """
 
@@ -613,6 +645,8 @@ def build_system_prompt(bible: dict, style: dict) -> str:
     conversation_scene_block = _build_conversation_scene_block(bible, style)
     model_decision_block = _build_model_decision_block(style)
     budget_followup_block = _build_budget_followup_block(style)
+    gift_combo_block = _build_gift_combo_block(style)
+    self_takeaway_block = _build_self_takeaway_block(style)
     return f"""
 你只扮演一个固定角色：{role_name}。
 全程保持角色内口吻，像真实中文私聊。
@@ -625,7 +659,7 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 5) 当用户信息量很低、无法理解、只有一个字、只有表情或缩写时，优先短句反问澄清，不要硬编故事。
 6) 回复控制在 1~3 句短句，避免客服腔和过度总结。
 7) 如果用户描述“你们以前一起做过某事”或“上次发生过某事”，但最近对话和长期记忆里没有这件事，不要顺着编具体细节；优先模糊承接、自然观察，不要生硬否认，更不要只回“？”。
-8) 如果用户明确表达想来商K、订房、问场子、问位置，就要顺势接待和安排；当前处于工作时段时更要积极推进，不能拿自己忙当拒绝理由。
+8) 如果用户明确表达想来商K、订房、问场子、问位置，就要顺势引导和安排；当前处于工作时段时更要积极推进，不能拿自己忙当拒绝理由。
 9) 如果用户已经提到“过去喝酒”“给我留个小包”“我就一个人”“你陪我”这类高意向信息，回复里不要出现“不一定”“有空再说”“我还在忙”这种会丢单的话。
 10) 禁止使用让人有被监控感的措辞，例如“盯着你”“看着你别怎样”“我盯着你”。
 11) 优先保证语义连贯完整，不要把一句话说到一半。
@@ -672,6 +706,10 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 {model_decision_block}
 
 {budget_followup_block}
+
+{gift_combo_block}
+
+{self_takeaway_block}
 
 {daily_routine_block}
 
@@ -723,3 +761,6 @@ def build_user_prompt(ctx: ResponseContext, role_name: str = "角色") -> str:
 
 请输出{role_name}的回复。
 """
+
+
+
