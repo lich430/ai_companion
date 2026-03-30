@@ -734,6 +734,111 @@ class CompanionEngine:
             return "你好。"
         return None
 
+    def _matches_sales_scene(self, text: str, scene: str) -> bool:
+        raw = (text or "").strip().lower()
+        if not raw:
+            return False
+        rules = {
+            "work_question": {
+                "tokens": ["你从事什么工作", "你做什么工作", "做什么工作", "你是做什么的", "你在什么公司", "做什么的", "上什么班", "干什么工作", "干啥工作", "做哪行"],
+                "patterns": [r"你.*(做什么|干什么|干啥).{0,4}(工作|的)", r"你.*上什么班"],
+            },
+            "chat_only": {
+                "tokens": ["不过去玩就不能找你聊天", "不过去玩就不能找你聊天了", "不去玩就不能找你聊天", "不去玩就不能聊天", "不过去玩就不能聊天"],
+                "patterns": [r"不.*(过去玩|去玩|消费).*(不能|不让).*(聊天|找你)", r"不去玩.*能不能.*聊天"],
+            },
+            "discount_question": {
+                "tokens": ["酒水能便宜吗", "酒水可以便宜吗", "能便宜吗", "能优惠吗", "酒水优惠", "便宜点", "优惠点", "少点", "能少点吗"],
+                "patterns": [r"(酒水|消费).*(便宜|优惠|少点)", r"能.*(便宜|优惠|少点)"],
+            },
+            "send_alcohol": {
+                "tokens": ["送酒不", "送不送酒", "送酒吗", "可以送酒吗", "送酒水吗", "给不给送酒"],
+                "patterns": [r"送.*酒", r"给不给.*酒"],
+            },
+            "not_enough_alcohol": {
+                "tokens": ["酒水别不够", "酒不够", "不够喝", "酒水不够", "别不够啊", "怕不够喝", "够不够喝"],
+                "patterns": [r"酒.*不够", r"不够.*喝", r"够不够.*喝"],
+            },
+            "light_drinking": {
+                "tokens": ["我们就4个人喝的不多", "喝的不多", "四个人喝的不多", "我们几个喝的不多", "我们喝的不多"],
+                "patterns": [r"(我们|就).*(喝的不多|不怎么喝)", r"\d+个.*喝的不多"],
+            },
+            "outcall": {
+                "tokens": ["出台", "可以出台吗", "能出台吗", "出台什么价格", "出台多少钱", "出台价格", "外出", "出去陪", "陪出去"],
+                "patterns": [r"(能|可以).*(出台|出去陪)", r"(出台|出去陪).*(价格|多少钱)"],
+            },
+            "play_style": {
+                "tokens": ["妹子放的开吗", "妹子玩的咋样", "妹子玩得咋样", "妹子会玩吗", "妹子玩的怎么样", "放得开吗", "会来事吗"],
+                "patterns": [r"妹子.*(会不会玩|怎么玩|放得开)", r"(放得开|会来事|会玩).*吗"],
+            },
+            "quality": {
+                "tokens": ["妹子咋样", "妹子好看吗", "妹子漂亮吗", "妹子质量怎么样", "妹子质量咋样", "质量怎么样", "颜值怎么样", "妹子颜值", "靓不靓"],
+                "patterns": [r"妹子.*(咋样|怎么样|好看|漂亮|颜值)", r"(质量|颜值).*(怎么样|咋样)"],
+            },
+            "age": {
+                "tokens": ["妹妹都是多大的", "妹子都是多大的", "妹子多大", "妹妹多大", "都多大", "年龄多大"],
+                "patterns": [r"(妹妹|妹子|女孩|女孩子).*(多大|几岁)", r"(多大|几岁).*(妹妹|妹子|女孩|女孩子)"],
+            },
+            "scope": {
+                "tokens": ["你们那边都有什么", "你那边都有什么", "那边都有什么", "你们这边都有什么", "你这边都有什么", "这边都有什么", "有啥", "都有什么项目", "可以玩啥"],
+                "patterns": [r"(你们|你|这边|那边).*(都有什么|有啥|玩啥)", r"有什么.*(项目|玩的)"],
+            },
+            "photo": {
+                "tokens": ["有没有图片", "有妹子照片吗", "有照片吗", "妹子照片", "照片吗", "有图吗", "发点照片", "看看照片", "佳丽照片"],
+                "patterns": [r"(图片|照片|有图).*(吗|看看|发)", r"发.*(图片|照片|照片看看)"],
+            },
+            "beauty_count": {
+                "tokens": ["美女多吗", "美女多不多", "妹子多吗", "姑娘多吗", "女孩子多吗"],
+                "patterns": [r"(美女|妹子|姑娘|女孩子).*(多吗|多不多)"],
+            },
+            "vacuum": {
+                "tokens": ["真空", "和上次一样", "上次一样", "还是老样子"],
+                "patterns": [r"真空", r"上次一样"],
+            },
+            "outside_girls": {
+                "tokens": ["出去的美女", "有没有出去的", "能跟我出去的", "带出去的美女", "出去的妹子"],
+                "patterns": [r"(出去的|带出去的).*(美女|妹子|女孩)", r"有没有.*出去的"],
+            },
+            "two_girls_request": {
+                "tokens": ["我们需要2个", "需要2个", "钱不是问题", "换地方玩了", "两个女孩", "两个妹子"],
+                "patterns": [r"需要.*2个", r"钱不是问题", r"没有就换地方"],
+            },
+            "open_play": {
+                "tokens": ["玩的开放", "玩得开放", "没意思呀", "没意思啊", "要玩的开", "玩得嗨点"],
+                "patterns": [r"玩.*开放", r"没意思", r"玩的开"],
+            },
+            "come_drink": {
+                "tokens": ["今天晚上过去玩", "晚上过去玩", "过去玩", "过去喝酒", "来喝酒", "过来喝酒", "晚上去你那", "今晚去你那", "过来玩"],
+                "patterns": [r"(今晚|晚上|现在).*(过去|过来|去你那).*(玩|喝酒)?", r"(过去|过来).*(玩|喝酒)"],
+            },
+            "send_some_alcohol": {
+                "tokens": ["今天能不能送点酒", "能不能送点酒", "送点酒", "给送点酒", "送点酒呗"],
+                "patterns": [r"(能不能|给).*(送点酒)", r"送点酒"],
+            },
+            "bring_fun_inside": {
+                "tokens": ["带点能玩的进来", "带点能玩的", "能玩的进来", "能玩不给小费", "不给小费", "带点好玩的进来"],
+                "patterns": [r"带点.*能玩", r"能玩的.*进来", r"不给小费"],
+            },
+            "in_company": {
+                "tokens": ["在不在公司", "在公司吗", "在店里吗", "在店吗", "在不在店", "在场子吗", "在不在场子"],
+                "patterns": [r"在不在.*(公司|店|场子)", r"在.*(公司|店里|店吗|场子)"],
+            },
+            "eta": {
+                "tokens": ["快结束了", "一会到", "差不多到了", "四十分钟", "半小时", "一个小时", "40分钟", "1小时", "快到了"],
+                "patterns": [r"(半小时|一小时|\d+分钟).*(到|到那|到店)", r"快结束了", r"快到了"],
+            },
+            "booking": {
+                "tokens": ["订房", "开包厢", "留个包", "留位", "安排一下", "定个包", "订个房", "开个包厢", "预定包厢", "预留包厢"],
+                "patterns": [r"(订|定|开|预定|预留).*(房|包|包厢)", r"留.*(位|包)", r"安排.*(一下|一个)"],
+            },
+        }
+        rule = rules.get(scene) or {}
+        tokens = rule.get("tokens") or []
+        patterns = rule.get("patterns") or []
+        if tokens and self._contains_any(raw, tokens):
+            return True
+        return any(re.search(pattern, raw) for pattern in patterns)
+
     def _build_sales_template_reply(self, latest_text: str, recent: list[Message], time_context: dict) -> str | None:
         latest = (latest_text or "").strip()
         if not latest:
@@ -761,76 +866,73 @@ class CompanionEngine:
         if self._is_location_request(latest):
             return "宁国路拉菲公馆，到了给我发消息"
 
-        if self._contains_any(latest, ["你从事什么工作", "你做什么工作", "做什么工作", "你是做什么的", "你在什么公司", "做什么的"]):
+        if self._matches_sales_scene(latest, "work_question"):
             return "我在夜场上班，平时陪客人喝酒聊天，也会帮忙订房安排包厢"
 
-        if self._contains_any(latest, ["不过去玩就不能找你聊天", "不过去玩就不能找你聊天了"]):
+        if self._matches_sales_scene(latest, "chat_only"):
             return "当然可以呀。"
 
-        if self._contains_any(latest, ["酒水能便宜吗", "酒水可以便宜吗", "能便宜吗", "能优惠吗", "酒水优惠"]):
+        if self._matches_sales_scene(latest, "discount_question"):
             return "你过来，我可以给你送酒"
 
-        if self._contains_any(latest, ["送酒不", "送不送酒", "送酒吗", "可以送酒吗"]):
+        if self._matches_sales_scene(latest, "send_alcohol"):
             return "可以送"
 
-        if self._contains_any(latest, ["酒水别不够", "酒不够", "不够喝", "酒水不够", "别不够啊"]):
+        if self._matches_sales_scene(latest, "not_enough_alcohol"):
             return "你这边可以点一些，我再送一些。"
 
-        if self._contains_any(latest, ["我们就4个人喝的不多", "喝的不多", "四个人喝的不多"]):
+        if self._matches_sales_scene(latest, "light_drinking"):
             if self._recent_user_mentions(recent, ["酒水别不够", "不够喝", "酒水不够", "就一箱酒水"]):
                 return "没事，酒一定会安排好。"
 
-        if self._contains_any(latest, ["出台","可以出台吗","能出台吗","出台什么价格", "出台多少钱", "出台价格"]):
+        if self._matches_sales_scene(latest, "outcall"):
             return "你过来玩，我可以给你介绍开放一点的女孩子，你自己聊"
 
-        if self._contains_any(latest, ["妹子放的开吗","妹子玩的咋样", "妹子玩得咋样", "妹子会玩吗", "妹子玩的怎么样"]):
+        if self._matches_sales_scene(latest, "play_style"):
             return "都挺会玩的，保证你们玩得尽兴"
 
-        if self._contains_any(latest, ["妹子咋样","妹子好看吗","妹子漂亮吗","妹子质量怎么样", "妹子质量咋样", "质量怎么样"]):
+        if self._matches_sales_scene(latest, "quality"):
             return "最近来了很多漂亮的新人"
 
-        if self._contains_any(latest, ["妹妹都是多大的", "妹子都是多大的", "多大"]):
+        if self._matches_sales_scene(latest, "age"):
             return "基本18到20左右"
 
-        if self._contains_any(latest, ["你们那边都有什么", "你那边都有什么", "那边都有什么", "你们这边都有什么", "你这边都有什么", "这边都有什么"]):
+        if self._matches_sales_scene(latest, "scope"):
             if booking_count >= 1:
                 return "有美女陪你唱歌喝酒"
             return "有美女陪你唱歌喝酒\n是打算今晚过来玩吗"
 
-        if self._contains_any(latest, ["有没有图片", "有妹子照片吗", "有照片吗", "妹子照片", "照片吗"]):
+        if self._matches_sales_scene(latest, "photo"):
             return "我手机上没有，公司人很多到了你可以挑嘛"
 
-        if self._contains_any(latest, ["美女多吗", "美女多不多"]):
-            if self._contains_any(latest, ["朋友", "去玩", "过去玩", "晚上"]):
-                if booking_count >= 1:
-                    return "很多呀"
-                return "很多呀"
+        if self._matches_sales_scene(latest, "beauty_count"):
+            return "很多呀"
 
-        if self._contains_any(latest, ["真空"]) and self._contains_any(latest, ["和上次一样", "上次一样"]):
+        if self._matches_sales_scene(latest, "vacuum"):
             return "可以的"
 
-        if self._contains_any(latest, ["出去的美女", "有没有出去的", "能跟我出去的"]):
+        if self._matches_sales_scene(latest, "outside_girls"):
             return "有，你们自己沟通，我也可以协助你沟通"
 
-        if self._contains_any(latest, ["我们需要2个", "需要2个", "钱不是问题", "换地方玩了"]):
+        if self._matches_sales_scene(latest, "two_girls_request"):
             return "没问题，来了和我们经理说"
 
-        if self._contains_any(latest, ["玩的开放", "玩得开放", "没意思呀"]):
+        if self._matches_sales_scene(latest, "open_play"):
             return "那是自然的，肯定让你玩的高兴"
 
-        if self._contains_any(latest, ["今天晚上过去玩", "晚上过去玩", "过去玩", "过去喝酒", "来喝酒", "过来喝酒"]):
+        if self._matches_sales_scene(latest, "come_drink"):
             return "好，你们几个人"
 
-        if self._contains_any(latest, ["今天能不能送点酒", "能不能送点酒", "送点酒"]):
+        if self._matches_sales_scene(latest, "send_some_alcohol"):
             return "可以，到时候你点一些，我送一点"
 
-        if self._contains_any(latest, ["带点能玩的进来", "带点能玩的", "能玩的进来", "能玩不给小费", "不给小费"]):
+        if self._matches_sales_scene(latest, "bring_fun_inside"):
             return "放心，不能玩不给小费"
 
-        if self._contains_any(latest, ["在不在公司", "在公司吗", "在店里吗", "在店吗", "在不在店"]):
+        if self._matches_sales_scene(latest, "in_company"):
             return "在公司呢"
 
-        if eta or self._contains_any(latest, ["快结束了", "一会到", "差不多到了", "四十分钟", "半小时", "一个小时"]):
+        if eta or self._matches_sales_scene(latest, "eta"):
             return "好的，快到了给我发信息，我去门口接你们"
 
         if party_size and self._contains_any(last_assistant, ["几个人"]):
@@ -844,7 +946,7 @@ class CompanionEngine:
                 return f"好，{room_label}这边我记着，你们快到了跟我说。"
             return f"好，{room_label}先给你留着，你们快到了跟我说"
 
-        if self._contains_any(latest, ["订房", "开包厢", "留个包", "留位", "安排一下"]):
+        if self._matches_sales_scene(latest, "booking"):
             if booking_count >= 1:
                 return "可以，你们几个人"
             return "可以，你们几个人，我先给你安排"
