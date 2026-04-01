@@ -21,12 +21,25 @@ def _load_local_timezone():
         return timezone(timedelta(hours=8), name="UTC+08:00")
 
 
+def sanitize_text_for_model(text: str) -> str:
+    raw = str(text or "")
+    replacements = [
+        ("做爱", "亲热"),
+        ("口活", "口才"),
+        ("胸", "手"),
+    ]
+    for src, dst in replacements:
+        raw = raw.replace(src, dst)
+    return raw
+
+
 def format_recent_messages(messages: List[Message], max_turns: int = 200, role_name: str = "角色") -> str:
     clipped = messages[-max_turns:]
     lines = []
     for m in clipped:
         speaker = "用户" if m.role == "user" else role_name
-        lines.append(f"{speaker}: {m.content}")
+        content = sanitize_text_for_model(m.content) if m.role == "user" else m.content
+        lines.append(f"{speaker}: {content}")
     return "\n".join(lines)
 
 
@@ -52,7 +65,8 @@ def format_recent_messages_with_time(messages: List[Message], max_turns: int = 2
             last_date = current_date
         speaker = "用户" if m.role == "user" else role_name
         hhmm = dt.strftime("%H:%M") if dt else "--:--"
-        lines.append(f"{hhmm} {speaker}: {m.content}")
+        content = sanitize_text_for_model(m.content) if m.role == "user" else m.content
+        lines.append(f"{hhmm} {speaker}: {content}")
     return "\n".join(lines)
 
 
@@ -565,9 +579,11 @@ def _build_model_decision_block(style: dict) -> str:
 - 如果一句话里同时出现否定和业务词，例如“不过去玩”“只是聊天”“先不去”，优先按否定语义理解，不要误判成订房或到店意向。
 - 如果用户是在闲聊、确认关系、表达情绪、试探态度，先顺着当前话题自然回应，不要强行切到包厢、人数、订房、留位。
 - 不要主动提“留包厢”“预留包厢”“留位置”“留位”这类话题，除非用户自己先明确提出。
+- 如果用户聊黄色、暧昧、擦边或不太道德的话题，除非明确要求你本人出去、带走、回去、过夜，否则不要急着反驳、说教或转移话题。
+- 这类场景优先顺着当前气氛接住，用暧昧、轻挑、带拉扯的方式回应，但不要直接承诺线下越界行为。
 - 如果用户问预算、人均、酒水够不够、送不送、妹子质量、年龄、位置、玩法，先结合上下文完整理解问题，再给简短自然的答案。
 - 如果用户一条消息里有多个信息点，先回答核心诉求，不要只回其中一个次要关键词。
-- 最近30条消息里尽量避免重复同一句话或同一种意思的营销表达，特别是重复的营销推进话术不要机械重复。
+- 最近20条消息里尽量避免重复同一句话或同一种意思的营销表达，特别是重复的营销推进话术不要机械重复。
 - 如果最近已经多次说过“过来玩”“快来吧”“来店里”“今晚过来”这类推进话术，这一轮就不要再重复提。
 - 当前时段为：{current_period}。回复既要符合这个时段，也要符合当前对话的真实走向。
 """
@@ -665,6 +681,7 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 11) 优先保证语义连贯完整，不要把一句话说到一半。
 12) 禁止输出模糊边界尾句，例如“只要不过分”“看情况”“尺度内”“别太过分”。
 13) 当前关系如果还是 stranger，不要表现得像已经很熟，不要一上来就过度热情。
+14) 用户聊黄色、暧昧、擦边话题时，除非明确要求把你本人带走、一起出去、回去过夜，否则不要立刻反驳、说教或转移话题。
 
 角色摘要：
 {bible["persona_summary"]}
@@ -757,7 +774,7 @@ def build_user_prompt(ctx: ResponseContext, role_name: str = "角色") -> str:
 {format_recent_messages_with_time(ctx.recent_messages, role_name=role_name)}
 
 用户最新一句：
-用户: {ctx.latest_user_message}
+用户: {sanitize_text_for_model(ctx.latest_user_message)}
 
 请输出{role_name}的回复。
 """
