@@ -6,7 +6,7 @@ import time
 
 import requests
 
-from engine.prompt_builder import build_system_prompt, build_user_prompt
+from engine.prompt_builder import build_system_prompt, build_user_prompt, sanitize_text_for_model
 from models.schemas import ResponseContext
 
 
@@ -62,6 +62,7 @@ class GLMResponseGenerator(BaseResponseGenerator):
     def __init__(self, api_key: str, model: str = "glm-4.7"):
         super().__init__(api_key=api_key, model=model)
         self.url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        self.is_charglm = self.model.lower().startswith("charglm-")
         self.max_retries = max(0, int(os.getenv("GLM_MAX_RETRIES", "5")))
         self.retry_backoff_sec = max(0.1, float(os.getenv("GLM_RETRY_BACKOFF_SEC", "15.0")))
         self.retry_max_backoff_sec = max(self.retry_backoff_sec, float(os.getenv("GLM_RETRY_MAX_BACKOFF_SEC", "60.0")))
@@ -100,6 +101,121 @@ class GLMResponseGenerator(BaseResponseGenerator):
             return resp.json()["choices"][0]["message"]["content"].strip()
         detail = (resp.text or "")[:1500]
         raise requests.HTTPError(f"GLM chat failed: {resp.status_code} {detail}", response=resp)
+
+    @staticmethod
+    def _charglm_user_name(ctx: ResponseContext) -> str:
+        name = str(getattr(ctx.profile, "nickname", "") or "").strip()
+        return name or "顾客"
+
+    @staticmethod
+    def _charglm_user_info(ctx: ResponseContext) -> str:
+        topics = [str(x).strip() for x in (ctx.profile.recurring_topics or []) if str(x).strip()]
+        if topics:
+            return f"KTV customer; common topics: {', '.join(topics[:4])}"
+        return "KTV customer"
+
+    @staticmethod
+    def _charglm_bot_info(bible: dict, style: dict, system_prompt: str) -> str:
+        summary = str(bible.get("persona_summary", "") or "").strip()
+        tone = str((bible.get("speech_style") or {}).get("tone", "") or "").strip()
+        stage = str(style.get("stage", "") or "").strip()
+        mood = str(style.get("mood", "") or "").strip()
+        parts = [
+            part
+            for part in [
+                summary,
+                f"stage={stage}" if stage else "",
+                f"mood={mood}" if mood else "",
+                f"tone={tone}" if tone else "",
+            ]
+            if part
+        ]
+        info = "; ".join(parts)
+        if system_prompt:
+            newline = chr(10)
+            info = ((info + newline + newline + "extra_rules:" + newline + system_prompt).strip() if info else system_prompt)
+        return info[:12000]
+
+    def _build_charglm_messages(self, ctx: ResponseContext) -> list[dict]:
+        messages = []
+        for item in ctx.recent_messages[-40:]:
+            role = "assistant" if item.role == "assistant" else "user"
+            content = item.content if role == "assistant" else sanitize_text_for_model(item.content)
+            content = str(content or "").strip()
+            if not content:
+                continue
+            messages.append({"role": role, "content": content})
+        latest = sanitize_text_for_model(ctx.latest_user_message)
+        if not messages or messages[-1].get("role") != "user" or messages[-1].get("content") != latest:
+            messages.append({"role": "user", "content": latest})
+        return messages[-40:]
+
+    def _chat_charglm(self, bible: dict, style: dict, ctx: ResponseContext, system_prompt: str, temperature: float = 0.85) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "model": self.model,
+            "meta": {
+                "user_name": self._charglm_user_name(ctx),
+                "bot_name": str(bible.get("name", "") or "小晚").strip() or "小晚",
+                "bot_info": self._charglm_bot_info(bible, style, system_prompt),
+                "user_info": self._charglm_user_info(ctx),
+            },
+            "messages": self._build_charglm_messages(ctx),
+            "temperature": temperature,
+            "max_tokens": 51200,
+        }
+        self._log_request("glm", data["meta"]["bot_info"], chr(10).join([f"{m['role']}: {m['content']}" for m in data["messages"]]))
+        last_err: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = requests.post(self.url, headers=headers, json=data, timeout=self.request_timeout_sec)
+                if resp.ok:
+                    content = resp.json()["choices"][0]["message"]["content"].strip()
+                    self._log_response("glm", content)
+                    return content
+                detail = (resp.text or "")[:1500]
+                raise requests.HTTPError(f"GLM chat failed: {resp.status_code} {detail}", response=resp)
+            except requests.HTTPError as e:
+                last_err = e
+                status = (e.response.status_code if e.response is not None else None)
+                detail = ((e.response.text if e.response is not None else str(e)) or "")[:600]
+                retryable = status in {408, 409, 429, 500, 502, 503, 504}
+                self.logger.error(
+                    "ChargeGLM request failed | model=%s attempt=%d/%d status=%s detail=%s",
+                    self.model,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    status,
+                    detail,
+                )
+                if (not retryable) or attempt >= self.max_retries:
+                    break
+                self._sleep_before_retry(attempt, status=status, detail=detail)
+            except Exception as e:
+                last_err = e
+                self.logger.error(
+                    "ChargeGLM request exception | model=%s attempt=%d/%d err=%s",
+                    self.model,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    e,
+                )
+                if attempt >= self.max_retries:
+                    break
+                self._sleep_before_retry(attempt)
+        if isinstance(last_err, Exception):
+            raise last_err
+        raise RuntimeError("ChargeGLM request failed without error context")
+
+    def generate(self, bible: dict, style: dict, ctx: ResponseContext) -> str:
+        if not self.is_charglm:
+            return super().generate(bible, style, ctx)
+        system_prompt = build_system_prompt(bible, style)
+        content = self._chat_charglm(bible, style, ctx, system_prompt, temperature=0.85)
+        return content or "我在呢"
 
     def chat(self, system_prompt: str, user_prompt: str, temperature: float = 0.85) -> str:
         self._log_request("glm", system_prompt, user_prompt)

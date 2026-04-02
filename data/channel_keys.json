@@ -22,7 +22,7 @@
       "memory_db_path": "memory_Mkt9P2.db",
       "llm_provider": "glm",
       "glm_api_key": "e039f1f747e841498b83531550f5eda9.5gBi4fPgZiKy2IBZ",
-      "glm_chat_model": "glm-5"
+      "glm_chat_model": "charglm-4"
     },
     "Rly7Q1": {
       "role_bible_path": "data/honey_bible.json",
