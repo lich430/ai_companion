@@ -62,14 +62,40 @@ class GLMResponseGenerator(BaseResponseGenerator):
     def __init__(self, api_key: str, model: str = "glm-4.7"):
         super().__init__(api_key=api_key, model=model)
         self.url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        self.max_retries = max(0, int(os.getenv("GLM_MAX_RETRIES", "2")))
-        self.retry_backoff_sec = max(0.1, float(os.getenv("GLM_RETRY_BACKOFF_SEC", "1.0")))
+        self.max_retries = max(0, int(os.getenv("GLM_MAX_RETRIES", "5")))
+        self.retry_backoff_sec = max(0.1, float(os.getenv("GLM_RETRY_BACKOFF_SEC", "15.0")))
+        self.retry_max_backoff_sec = max(self.retry_backoff_sec, float(os.getenv("GLM_RETRY_MAX_BACKOFF_SEC", "60.0")))
+        self.request_timeout_sec = max(5.0, float(os.getenv("GLM_REQUEST_TIMEOUT_SEC", "60.0")))
+        self.busy_retry_wait_sec = max(
+            self.retry_backoff_sec,
+            float(os.getenv("GLM_BUSY_RETRY_WAIT_SEC", "60.0")),
+        )
         self.fallback_model = str(os.getenv("GLM_FALLBACK_MODEL", "") or "").strip()
+
+    @staticmethod
+    def _is_busy_overload(status: int | None, detail: str) -> bool:
+        if status != 429:
+            return False
+        lowered = (detail or "").lower()
+        return "1305" in lowered or "访问量过大" in detail or "稍后再试" in detail
+
+    def _sleep_before_retry(self, attempt: int, status: int | None = None, detail: str = "") -> None:
+        wait_sec = min(self.retry_backoff_sec * (2 ** attempt), self.retry_max_backoff_sec)
+        if self._is_busy_overload(status, detail):
+            wait_sec = max(wait_sec, self.busy_retry_wait_sec)
+            self.logger.warning(
+                "GLM model busy, waiting %.1fs before retry | model=%s next_attempt=%d/%d",
+                wait_sec,
+                self.model,
+                attempt + 2,
+                self.max_retries + 1,
+            )
+        time.sleep(wait_sec)
 
     def _post_chat(self, model: str, headers: dict, data: dict) -> str:
         payload = dict(data)
         payload["model"] = model
-        resp = requests.post(self.url, headers=headers, json=payload, timeout=150)
+        resp = requests.post(self.url, headers=headers, json=payload, timeout=self.request_timeout_sec)
         if resp.ok:
             return resp.json()["choices"][0]["message"]["content"].strip()
         detail = (resp.text or "")[:1500]
@@ -115,7 +141,7 @@ class GLMResponseGenerator(BaseResponseGenerator):
                 )
                 if (not retryable) or attempt >= self.max_retries:
                     break
-                time.sleep(self.retry_backoff_sec * (2 ** attempt))
+                self._sleep_before_retry(attempt, status=status, detail=detail)
             except Exception as e:
                 last_err = e
                 self.logger.error(
@@ -127,7 +153,7 @@ class GLMResponseGenerator(BaseResponseGenerator):
                 )
                 if attempt >= self.max_retries:
                     break
-                time.sleep(self.retry_backoff_sec * (2 ** attempt))
+                self._sleep_before_retry(attempt)
 
         if self.fallback_model and self.fallback_model != self.model:
             self.logger.warning(
@@ -151,7 +177,12 @@ class GLMResponseGenerator(BaseResponseGenerator):
                     )
                     if attempt >= self.max_retries:
                         break
-                    time.sleep(self.retry_backoff_sec * (2 ** attempt))
+                    if isinstance(e, requests.HTTPError):
+                        status = (e.response.status_code if e.response is not None else None)
+                        detail = ((e.response.text if e.response is not None else str(e)) or "")[:600]
+                        self._sleep_before_retry(attempt, status=status, detail=detail)
+                    else:
+                        self._sleep_before_retry(attempt)
 
         if isinstance(last_err, Exception):
             raise last_err

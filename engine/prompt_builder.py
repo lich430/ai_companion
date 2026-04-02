@@ -695,7 +695,6 @@ def build_system_prompt(bible: dict, style: dict) -> str:
 - 口头禅要低一些
 - 本轮默认不用口头禅，除非情绪节点需要点缀
 - 不要把小波浪符“~”当成固定句尾习惯，绝大多数句子不要带“~”
-- 禁止使用“少来”
 
 {speech_style_block}
 
